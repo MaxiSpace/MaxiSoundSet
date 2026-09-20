@@ -1,0 +1,39 @@
+**شرایط و توافق‌نامه استفاده از نرم‌افزار**
+
+نصب، راه‌اندازی یا استفاده از این برنامه به منزله مطالعه دقیق، آگاهی و پذیرش کامل مفاد این توافق‌نامه است. در صورت عدم موافقت با هر یک از بندهای زیر، لطفاً برنامه را از دستگاه خود حذف کنید.
+
+**۱. ماهیت نسخه آزمایشی (نسخه بتا)** این برنامه هم‌اکنون در فاز توسعه و نسخه بتا (Beta) قرار دارد. به همین منظور، ممکن است برخی از عملکردها، پلاگین‌ها یا بخش‌های نرم‌افزار با ناپایداری، خطا، باگ یا افت کارایی مواجه شوند.
+
+**۲. عدم ارائه ضمانت عملکرد (Disclaimer of Warranty)** این نرم‌افزار «به همان شکلی که هست» (As-Is) و بدون هرگونه ضمانت صریح یا ضمنی مبنی بر عملکرد بی‌نقص، بدون وقفه یا اجرای ایده‌آل روی تمامی دستگاه‌ها و سیستم‌های صوتی ارائه می‌شود.
+
+**۳. دسترسی‌ها و حفظ حریم خصوصی کاربران**
+
+- **هدف دسترسی‌ها:** برنامه جهت ارائه قابلیت‌های اصلی پردازش و کنترل صوت (شامل تنظیم خروجی، بوست صدا، اکولایزر و نصب یا همگام‌سازی پلاگین‌های صوتی ضروری) ممکن است نیازمند دسترسی‌های فنی مرتبط با سیستم صوتی و فایل‌های محلی باشد.
+- **تعهد به حریم خصوصی:** هیچ‌گونه داده شخصی، داده هویتی، فایل‌های شخصی یا اطلاعات خصوصی از دستگاه کاربر جمع‌آوری، ذخیره یا به سرورهای خارجی منتقل نمی‌شود. پردازش‌ها به صورت محلی در جهت ارائه خدمات صوتی برنامه انجام می‌گیرد.
+- کاربر با تأیید دسترسی‌ها در دستگاه خود، مجوز اجرای این فرایندها را در چارچوب مذکور صادر می‌کند.
+
+**۴. مالکیت معنوی، حق تکثیر و شرایط انتشار** این نسخه از نرم‌افزار به صورت کاملاً رایگان عرضه شده است. فروش، بازفروش، بسته‌بندی تجاری، مهندسی معکوس یا کسب درآمد از طریق واگذاری این نسخه توسط هر شخص حقیقی یا حقوقی غیرمجاز بوده و نقض حقوق توسعه‌دهنده محسوب می‌شود.
+
+**۵. به‌روزرسانی قوانین و تغییرات آتی** توسعه‌دهنده این حق را برای خود محفوظ می‌دارد که در صورت لزوم، شرایط و مفاد این توافق‌نامه را در نسخه‌های آتی اصلاح، تکمیل یا بازنویسی کند. ادامه استفاده کاربر از هر یک از نسخه‌های نرم‌افزار به منزله پذیرش آخرین نسخه اعمال‌شده از این قوانین خواهد بود.
+
+---
+
+**Software Terms and End User Agreement**
+
+Installing, launching or using this application constitutes careful reading, awareness and full acceptance of this agreement. If you do not agree with any provision below, please remove the application from your device.
+
+**1. Experimental release (Beta)** This application is currently under development and in its Beta phase. Some functions, plugins or components may therefore experience instability, errors, bugs or reduced performance.
+
+**2. Disclaimer of Warranty** This software is provided As-Is, without any express or implied warranty of flawless, uninterrupted or ideal operation on all devices and audio systems.
+
+**3. Permissions and User Privacy**
+
+- **Purpose of permissions:** To provide its core audio processing and control features, including output configuration, audio boost, equalization and installing or synchronizing essential audio plugins, the application may require technical access related to the audio system and local files.
+- **Privacy commitment:** No personal data, identity information, personal files or private information is collected, stored or transmitted from the user's device to external servers. Processing takes place locally to provide the application's audio services.
+- By approving permissions on their device, the user authorizes these processes within the scope described above.
+
+**4. Intellectual Property, Copyright and Distribution** This version is provided entirely free of charge. Selling, reselling, commercial repackaging, reverse engineering or earning revenue by distributing this version by any unauthorized person or legal entity is prohibited and constitutes an infringement of the developer's rights.
+
+**5. Updates to Terms and Future Changes** The developer reserves the right to amend, supplement or rewrite this agreement in future versions when necessary. Continued use of any software version constitutes acceptance of the latest applicable version of these terms.
+
+Third-party components retain their own licenses. See ThirdParty-Licenses.
