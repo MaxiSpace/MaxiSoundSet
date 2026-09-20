@@ -1,6 +1,0 @@
-Settings icon: Lucide settings.svg
-https://github.com/lucide-icons/lucide/blob/main/icons/settings.svg
-ISC License; see Lucide-LICENSE.txt. Stroke color and width match the app navigation.
-App icon: user-provided c-100.jpg; copied byte-for-byte as icon.jpg and losslessly converted to PNG for Slint. Native ICO contains seven standard sizes.
-Collapsed sidebar logo: user-provided white c.svg, copied byte-for-byte as sidebar-logo.svg.
-Sidebar chevrons: simple app-native vector paths, matched to the navigation stroke.
