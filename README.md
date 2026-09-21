@@ -45,7 +45,7 @@
 - 🔀 **Virtual Audio Routing:** Optionally route processed audio to a virtual cable for live streaming and recording workflows.
 - 🚀 **Windows Integration:** Run automatically on system startup and resume the last active audio session after sign-in.
 - 🌍 **Dual Interface:** Fully supports both English (LTR) and Persian (RTL).
-- 🔄 **Update Notifications:** Check for new application releases from GitHub directly inside the About page.
+- 🔄 **Update Notifications:** Check for new application releases from GitHub directly within the About tab in the application.
 
 ---
 
@@ -63,7 +63,7 @@ By installing this optional component, you unlock advanced audio control and max
 
 ## 🔄 Updates
 
-The **About** page checks GitHub Releases for new software versions. Checking for supplementary components (such as Virtual Cable driver availability) runs independently from main application updates.
+The **About** tab inside the application checks GitHub Releases for new software versions. Checking for supplementary components (such as Virtual Cable driver availability) runs independently from main application updates.
 
 ---
 
