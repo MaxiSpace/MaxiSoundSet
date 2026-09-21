@@ -51,9 +51,6 @@
 
 ## 🔌 Virtual Cable (Optional Component)
 
-> [!TIP]
-> **Recommended for streamers, content creators, and advanced audio setups.**
-
 By installing this optional component, you unlock advanced audio control and maximum output fidelity:
 - 🔊 **Volume Doubling** to safely push levels without harsh clipping.
 - ⚖️ **Enhanced Audio Stabilization** for smooth, consistent sound dynamics.
