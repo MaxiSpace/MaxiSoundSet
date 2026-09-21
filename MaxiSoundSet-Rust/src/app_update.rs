@@ -69,6 +69,7 @@ impl Manager {
 struct Release {
     tag_name: String,
     draft: bool,
+    prerelease: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -169,16 +170,20 @@ fn latest_release(current: &str) -> Result<(String, bool)> {
         .context("Could not read the GitHub release list")?;
     anyhow::ensure!(bytes.len() <= 1_000_000, "GitHub release list is too large");
     let releases: Vec<Release> = serde_json::from_slice(&bytes)?;
-    let (version, parsed) = releases
-        .into_iter()
-        .filter(|release| !release.draft)
-        .filter_map(|release| parse_version(&release.tag_name).map(|v| (release.tag_name, v)))
-        .max_by_key(|(_, version)| *version)
-        .context("No versioned GitHub release was found")?;
+    let (version, parsed) = newest_official_release(releases)
+        .context("No versioned official GitHub release was found")?;
     Ok((
         version.trim_start_matches(['v', 'V']).to_string(),
         parsed > current,
     ))
+}
+
+fn newest_official_release(releases: Vec<Release>) -> Option<(String, Version)> {
+    releases
+        .into_iter()
+        .filter(|release| !release.draft && !release.prerelease)
+        .filter_map(|release| parse_version(&release.tag_name).map(|v| (release.tag_name, v)))
+        .max_by_key(|(_, version)| *version)
 }
 
 #[cfg(test)]
@@ -196,5 +201,19 @@ mod tests {
         assert!(parse_version("Beta 1.5").unwrap() > current);
         assert!(parse_version("v1.0.0").unwrap() > current);
         assert!(parse_version("Beta 1.3").unwrap() < current);
+    }
+
+    #[test]
+    fn update_check_ignores_drafts_and_prereleases() {
+        let releases: Vec<Release> = serde_json::from_str(
+            r#"[
+                {"tag_name":"v1.2.0-beta.1","draft":false,"prerelease":true},
+                {"tag_name":"v1.1.1","draft":true,"prerelease":false},
+                {"tag_name":"v1.1.0","draft":false,"prerelease":false}
+            ]"#,
+        )
+        .unwrap();
+        let latest = newest_official_release(releases).unwrap();
+        assert_eq!(latest.0, "v1.1.0");
     }
 }

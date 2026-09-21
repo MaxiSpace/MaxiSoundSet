@@ -407,7 +407,7 @@ export component AppWindow inherits Window {
     in-out property <bool> startup-active: false;
     in property <string> startup-message;
     in property <string> app-version;
-    property <string> version-label: "v1.0.0";
+    property <string> version-label: "v1.0.1";
     out property <string> sidebar-brand-text: root.english ? "MAXI\nSOUNDSET" : "مکسی سَوندسِت";
     out property <string> log-label: root.english ? "Log" : "لاگ";
     out property <string> gain-label: root.english ? "GAIN" : "بهره صدا";
@@ -848,7 +848,7 @@ export component AppWindow inherits Window {
                 Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "About MAXI SOUNDSET" : "درباره MAXI SOUNDSET"; color: Colors.text; font-size: 28px; font-weight: 800; }
                 about-overview := Rectangle { height: 278px; vertical-stretch: 0; border-radius: 24px; background: Colors.panel; border-width: 1px; border-color: Colors.border;
                     VerticalLayout { padding: 16px; spacing: 5px; alignment: start;
-                        Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "MAXI SOUNDSET  ·  " + root.version-label : "مکسی سَوندسِت. نسخه ۱.۰.۰"; color: #90dfeb; font-size: 20px; font-weight: 700; }
+                        Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "MAXI SOUNDSET  ·  " + root.version-label : "مکسی سَوندسِت. نسخه ۱.۰.۱"; color: #90dfeb; font-size: 20px; font-weight: 700; }
                         Rectangle { height: 36px; vertical-stretch: 0; background: transparent;
                             update-action := Action {
                                 x: Locale.rtl ? parent.width - self.width : 0px;
