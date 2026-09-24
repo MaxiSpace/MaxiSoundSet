@@ -114,8 +114,14 @@ fn bootstrap() -> Result<Option<PathBuf>> {
 }
 fn run() -> Result<()> {
     let args = std::env::args().collect::<Vec<_>>();
-    if args.get(1).is_some_and(|s| s == "--self-test") {
-        return self_test(Path::new(args.get(2).context("Missing fixture directory")?));
+    if args
+        .get(1)
+        .is_some_and(|s| s == "--self-test" || s == "--native-self-test")
+    {
+        return self_test(
+            Path::new(args.get(2).context("Missing fixture directory")?),
+            args.get(1).is_some_and(|s| s == "--native-self-test"),
+        );
     }
     let _com = platform::Com::new()?;
     let uninstall_root = bootstrap()?;
@@ -368,7 +374,7 @@ fn run() -> Result<()> {
                 }
             },
         );
-        timer.start(slint::TimerMode::Repeated,Duration::from_millis(700),move||{let Some(u)=w.upgrade()else{return};let i=index.get();let result=(||->Result<()>{match i{0=>snapshot(&u,&dir.join("Welcome-FA.png"))?,1=>u.set_step(1),2=>{snapshot(&u,&dir.join("Agreement-FA.png"))?;anyhow::ensure!(u.get_agreement_content_height()>u.get_agreement_visible_height(),"Persian agreement is not scrollable");u.set_agreement_scroll_y(-(u.get_agreement_content_height()-u.get_agreement_visible_height()));},3=>{snapshot(&u,&dir.join("Agreement-End-FA.png"))?;u.set_agreement_scroll_y(0.);u.set_step(2);u.set_accepted(true)},4=>snapshot(&u,&dir.join("Location-FA.png"))?,5=>{u.set_english(true);u.invoke_language_changed();u.set_step(0)},6=>snapshot(&u,&dir.join("Welcome-EN.png"))?,7=>u.set_step(1),8=>{snapshot(&u,&dir.join("Agreement-EN.png"))?;anyhow::ensure!(u.get_agreement_content_height()>u.get_agreement_visible_height(),"English agreement is not scrollable");u.set_agreement_scroll_y(-(u.get_agreement_content_height()-u.get_agreement_visible_height()));},9=>{snapshot(&u,&dir.join("Agreement-End-EN.png"))?;u.set_agreement_scroll_y(0.);u.set_step(3);u.set_busy(true);u.set_progress(0.56)},10=>snapshot(&u,&dir.join("Installing-EN.png"))?,11=>{u.set_busy(false);u.set_step(4)},12=>snapshot(&u,&dir.join("Finish-EN.png"))?,13=>{u.set_uninstall(true);u.set_step(1);u.set_english(false);u.invoke_language_changed()},14=>{u.set_app_running(true);snapshot(&u,&dir.join("Uninstall-Running-FA.png"))?;u.set_english(true);u.invoke_language_changed()},15=>{snapshot(&u,&dir.join("Uninstall-Running-EN.png"))?;u.set_closing_app(true);u.set_busy(true)},16=>{snapshot(&u,&dir.join("Uninstall-Closing-EN.png"))?;u.set_closing_app(false);u.set_busy(false);u.set_app_running(false)},17=>snapshot(&u,&dir.join("Uninstall-EN.png"))?,18=>{anyhow::ensure!(motion_seen.get(),"No animated intermediate page state observed");fs::write(dir.join("ui-smoke.txt"),"PASS: bilingual FA/EN installer; complete Persian and English agreements scroll to their final section and end marker; RTL step placement; Vazir; welcome/agreement/location/progress/finish/uninstall screens; app version v1.0.1; updated GPLv3 terms; MaxiSpace.dev / 2026 and brand rights; animated intermediate page states observed; isolated screenshots only; no host installation performed\n")?;let _=slint::quit_event_loop();},_=>()}Ok(())})();if let Err(e)=result{let _=fs::write(dir.join("ui-smoke.txt"),format!("FAIL {e:#}"));let _=slint::quit_event_loop();}index.set(i+1)});
+        timer.start(slint::TimerMode::Repeated,Duration::from_millis(700),move||{let Some(u)=w.upgrade()else{return};let i=index.get();let result=(||->Result<()>{match i{0=>snapshot(&u,&dir.join("Welcome-FA.png"))?,1=>u.set_step(1),2=>{snapshot(&u,&dir.join("Agreement-FA.png"))?;anyhow::ensure!(u.get_agreement_content_height()>u.get_agreement_visible_height(),"Persian agreement is not scrollable");u.set_agreement_scroll_y(-(u.get_agreement_content_height()-u.get_agreement_visible_height()));},3=>{snapshot(&u,&dir.join("Agreement-End-FA.png"))?;u.set_agreement_scroll_y(0.);u.set_step(2);u.set_accepted(true)},4=>snapshot(&u,&dir.join("Location-FA.png"))?,5=>{u.set_english(true);u.invoke_language_changed();u.set_step(0)},6=>snapshot(&u,&dir.join("Welcome-EN.png"))?,7=>u.set_step(1),8=>{snapshot(&u,&dir.join("Agreement-EN.png"))?;anyhow::ensure!(u.get_agreement_content_height()>u.get_agreement_visible_height(),"English agreement is not scrollable");u.set_agreement_scroll_y(-(u.get_agreement_content_height()-u.get_agreement_visible_height()));},9=>{snapshot(&u,&dir.join("Agreement-End-EN.png"))?;u.set_agreement_scroll_y(0.);u.set_step(3);u.set_busy(true);u.set_progress(0.56)},10=>snapshot(&u,&dir.join("Installing-EN.png"))?,11=>{u.set_busy(false);u.set_step(4)},12=>snapshot(&u,&dir.join("Finish-EN.png"))?,13=>{u.set_uninstall(true);u.set_step(1);u.set_english(false);u.invoke_language_changed()},14=>{u.set_app_running(true);snapshot(&u,&dir.join("Uninstall-Running-FA.png"))?;u.set_english(true);u.invoke_language_changed()},15=>{snapshot(&u,&dir.join("Uninstall-Running-EN.png"))?;u.set_closing_app(true);u.set_busy(true)},16=>{snapshot(&u,&dir.join("Uninstall-Closing-EN.png"))?;u.set_closing_app(false);u.set_busy(false);u.set_app_running(false)},17=>snapshot(&u,&dir.join("Uninstall-EN.png"))?,18=>{anyhow::ensure!(motion_seen.get(),"No animated intermediate page state observed");fs::write(dir.join("ui-smoke.txt"),format!("PASS: bilingual FA/EN installer; complete Persian and English agreements scroll to their final section and end marker; RTL step placement; Vazir; welcome/agreement/location/progress/finish/uninstall screens; app version v{}; updated GPLv3 terms; MaxiSpace.dev / 2026 and brand rights; animated intermediate page states observed; isolated screenshots only; no host installation performed\n", operations::VERSION))?;let _=slint::quit_event_loop();},_=>()}Ok(())})();if let Err(e)=result{let _=fs::write(dir.join("ui-smoke.txt"),format!("FAIL {e:#}"));let _=slint::quit_event_loop();}index.set(i+1)});
     }
     ui.run()?;
     Ok(())
@@ -384,10 +390,10 @@ fn snapshot(ui: &InstallerWindow, path: &Path) -> Result<()> {
         .write_image_data(pixels.as_bytes())?;
     Ok(())
 }
-fn self_test(dir: &Path) -> Result<()> {
+fn self_test(dir: &Path, native: bool) -> Result<()> {
     let _com = platform::Com::new()?;
     fs::create_dir_all(dir)?;
-    let _scope = platform::TestScope::new(&dir.join("integration"))?;
+    let _scope = platform::TestScope::new(&dir.join("integration"), native)?;
     let root = dir.join(format!("MAXI تست {}", operations::nonce()));
     let exe = std::env::current_exe()?;
     let options = operations::Options {
@@ -511,11 +517,9 @@ fn self_test(dir: &Path) -> Result<()> {
         |_| {},
     )?;
     let helper_report = dir.join(format!("helper-{}.json", operations::nonce()));
-    // Run only the installed fixture in smoke mode: no host startup changes or audio playback.
-    let mut app = std::process::Command::new(bootstrap_root.join("MaxiSoundSet.exe"))
-        .arg("--ui-smoke")
-        .arg(dir.join("running-app-ui"))
-        .spawn()?;
+    // Run the private fixture normally so the installer's safe-exit message can be verified
+    // without the app's timed UI diagnostic modes delaying their own shutdown.
+    let mut app = std::process::Command::new(bootstrap_root.join("MaxiSoundSet.exe")).spawn()?;
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while !running_app::is_running(&bootstrap_root)? {
         anyhow::ensure!(
@@ -570,6 +574,10 @@ fn self_test(dir: &Path) -> Result<()> {
         "Uninstall bootstrap left installation files"
     );
     let helper = PathBuf::from(helper_result["helper"].as_str().unwrap());
+    anyhow::ensure!(
+        fs::read(&helper)? == fs::read(&exe)?,
+        "Temporary uninstall helper bytes differ from the packaged installer"
+    );
     for _ in 0..30 {
         if !helper.exists() {
             break;
@@ -580,7 +588,17 @@ fn self_test(dir: &Path) -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    fs::write(dir.join("self-test.txt"),"PASS: running private app blocks uninstall without modifying files/data; process detection is scoped to installation; Close software requests cooperative Exit and waits for process completion; data stays intact until removal; installed Uninstall.exe launches temporary Rust helper and removes full installation including requested Data; native ShellLink targets and Start-menu/desktop links; registry version and uninstall entry; isolated HKCU test keys cleaned; unrelated startup preserved; single-file embedded payload exact; Unicode/spaces install path; upgrade preserves settings; late failed upgrade restores files/settings/registry/shortcuts; malicious ownership manifest rejected; uninstall preserves user data by default and unrelated files; explicit data deletion; owned marker; no host registry or shortcuts changed\n")?;
+    fs::write(
+        dir.join("self-test.txt"),
+        format!(
+            "PASS: running private app blocks uninstall without modifying files/data; process detection is scoped to installation; Close software requests cooperative Exit and waits for process completion; data stays intact until removal; installed Uninstall.exe launches a byte-verified temporary helper and removes full installation including requested Data; {}; registry version and uninstall entry; unrelated startup preserved; single-file embedded app payload exact; Unicode/spaces install path; upgrade preserves settings; late failed upgrade restores files/settings/registry/shortcuts; malicious ownership manifest rejected; uninstall preserves user data by default and unrelated files; explicit data deletion; owned marker; no real installation touched\n",
+            if native {
+                "native Windows Shell Links and an isolated HKCU registry key created and cleaned"
+            } else {
+                "test-only shortcut target files and virtual registry used because this session denies native integration writes"
+            }
+        ),
+    )?;
     Ok(())
 }
 struct TempHelperGuard(bool);
@@ -599,7 +617,7 @@ fn main() {
             &message,
         );
         if std::env::args()
-            .any(|s| s == "--self-test" || s == "--ui-smoke" || s == "--uninstall-self-test")
+            .any(|s| s == "--self-test" || s == "--native-self-test" || s == "--ui-smoke" || s == "--uninstall-self-test")
         {
             eprintln!("{message}");
             std::process::exit(1);

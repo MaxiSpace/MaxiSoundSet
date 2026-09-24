@@ -10,6 +10,7 @@ mod dsp;
 mod enhancer;
 mod loudness;
 mod native_tray;
+mod osd;
 mod settings;
 mod startup;
 mod window_repaint;
@@ -44,7 +45,12 @@ struct State {
     error: Option<String>,
     audio_apps: Vec<conflicts::AudioApp>,
     conflict_scan_at: Instant,
+    unmute_target: Option<i32>,
+    hotkey_errors: Vec<(usize, String)>,
+    hotkey_pending_audio: Option<HotkeyPendingAudio>,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HotkeyPendingAudio { Start, Stop }
 fn strings(values: Vec<String>) -> ModelRc<slint::SharedString> {
     Rc::new(VecModel::from(
         values.into_iter().map(Into::into).collect::<Vec<_>>(),
@@ -89,6 +95,281 @@ fn show(ui: &AppWindow) {
     } else {
         window_repaint::after_show(ui);
     }
+}
+fn notify_action(ui: &AppWindow, osd: &Rc<RefCell<Option<osd::Osd>>>, title_fa: &str, title_en: &str, detail_fa: &str, detail_en: &str) {
+    log::debug!("Background notification requested: UI visible={}, OSD initialized={}", ui.window().is_visible(), osd.borrow().is_some());
+    let english = ui.get_english();
+    let title = if english { title_en } else { title_fa };
+    let detail = if english { detail_en } else { detail_fa };
+    if ui.window().is_visible() {
+        let notice = if detail.is_empty() { title.to_string() } else { format!("{title} · {detail}") };
+        ui.set_volume_notice(notice.into());
+    } else {
+        if osd.borrow().is_none() {
+            match osd::Osd::new() {
+                Ok(window) => *osd.borrow_mut() = Some(window),
+                Err(error) => {
+                    log::error!("Background OSD initialization: {error:#}");
+                    return;
+                }
+            }
+        }
+        if let Some(window) = osd.borrow().as_ref() {
+            window.show(title, detail, !english);
+        }
+    }
+}
+fn profile_label(profile: i32, english: bool) -> &'static str {
+    const EN: [&str; 8] = ["System default", "Gentle", "Voice / dialogue", "Music", "Cinema", "Warm & relaxed", "Gaming focus", "Custom equalizer"];
+    const FA: [&str; 8] = ["پیش‌فرض سیستم", "ملایم", "گفتار و دیالوگ", "موسیقی", "سینما", "گرم و آرام", "تمرکز بازی", "اکولایزر سفارشی"];
+    if english { EN[profile.clamp(0, 7) as usize] } else { FA[profile.clamp(0, 7) as usize] }
+}
+fn handle_hotkey(ui: &AppWindow, state: &Rc<RefCell<State>>, osd: &Rc<RefCell<Option<osd::Osd>>>, action: usize) {
+    if state.borrow().exiting { return; }
+    if ui.get_busy() {
+        notify_action(ui, osd, "در حال اجرا", "Audio busy", "درخواست قبلی هنوز کامل نشده است.", "The previous audio action is still pending.");
+        return;
+    }
+    match action {
+        0 | 1 | 11 | 12 => {
+            let delta = if action == 0 || action == 11 { 5 } else { -5 };
+            let ceiling = if ui.get_mode() == 0 { 100 } else { 200 };
+            let current = if ui.get_target() == 0 && delta > 0 {
+                let mut s = state.borrow_mut();
+                s.unmute_target.take().unwrap_or(s.settings.default_volume)
+            } else { ui.get_target() };
+            ui.set_target((current + delta).clamp(0, ceiling));
+            read_config(ui, &mut state.borrow_mut());
+            let detail_fa = format!("سطح هدف: {}٪", ui.get_target());
+            let detail_en = format!("Target: {}%", ui.get_target());
+            notify_action(ui, osd, "تغییر ولوم", "Volume changed", &detail_fa, &detail_en);
+        }
+        2 | 13 => {
+            let unmute_target = state.borrow_mut().unmute_target.take();
+            let mut muted = false;
+            if ui.get_target() > 0 {
+                state.borrow_mut().unmute_target = Some(ui.get_target());
+                ui.set_target(0);
+                muted = true;
+            } else if let Some(target) = unmute_target {
+                ui.set_target(target.clamp(0, if ui.get_mode() == 0 { 100 } else { 200 }));
+            } else {
+                ui.set_target(state.borrow().settings.default_volume.clamp(1, 100));
+            }
+            read_config(ui, &mut state.borrow_mut());
+            let detail_fa = format!("سطح هدف: {}٪", ui.get_target());
+            let detail_en = format!("Target: {}%", ui.get_target());
+            if muted { notify_action(ui, osd, "صدا قطع شد", "Muted", &detail_fa, &detail_en); }
+            else { notify_action(ui, osd, "صدا وصل شد", "Unmuted", &detail_fa, &detail_en); }
+        }
+        3 => {
+            if ui.get_running() { notify_action(ui, osd, "صدا در حال اجراست", "Audio already running", "", ""); }
+            else if !ui.get_devices_ready() || !ui.get_recovery_ready() {
+                notify_action(ui, osd, "صدا هنوز آماده نیست", "Audio is not ready", "منتظر آماده‌شدن دستگاه‌ها و بازیابی صدا بمان.", "Wait for audio-device initialization and recovery.");
+            }
+            else {
+                ui.invoke_toggle_audio();
+                if ui.get_busy() {
+                    state.borrow_mut().hotkey_pending_audio = Some(HotkeyPendingAudio::Start);
+                    notify_action(ui, osd, "در حال شروع صدا", "Starting audio", "در انتظار آماده‌شدن موتور صدا", "Waiting for the audio engine");
+                } else {
+                    let detail = state.borrow().error.clone().unwrap_or_else(|| "موتور صدا شروع نشد".into());
+                    notify_action(ui, osd, "شروع صدا ناموفق بود", "Could not start audio", &detail, &detail);
+                }
+            }
+        }
+        4 => {
+            if ui.get_running() {
+                ui.invoke_toggle_pause();
+                if ui.get_paused() { notify_action(ui, osd, "صدا مکث شد", "Audio paused", "", ""); }
+                else { notify_action(ui, osd, "پخش ادامه یافت", "Audio resumed", "", ""); }
+            } else { notify_action(ui, osd, "صدا اجرا نیست", "Audio is not running", "برای مکث، ابتدا صدا را اجرا کن.", "Start audio before using pause."); }
+        }
+        5 => {
+            if ui.get_running() {
+                state.borrow().engine.stop(); ui.set_busy(true); ui.set_status("Stopping and restoring audio…".into());
+                state.borrow_mut().hotkey_pending_audio = Some(HotkeyPendingAudio::Stop);
+                notify_action(ui, osd, "در حال توقف صدا", "Stopping audio", "در حال بازگردانی دستگاه صدا", "Restoring the audio device");
+            } else { notify_action(ui, osd, "صدا متوقف است", "Audio is already stopped", "", ""); }
+        }
+        6 => {
+            ui.set_leveling(!ui.get_leveling()); read_config(ui, &mut state.borrow_mut());
+            if ui.get_leveling() { notify_action(ui, osd, "بلندی پایدار روشن", "Steady loudness on", "", ""); }
+            else { notify_action(ui, osd, "بلندی پایدار خاموش", "Steady loudness off", "", ""); }
+        }
+        7 => {
+            ui.set_intensity(match ui.get_intensity() { 2 => 1, 1 => 0, _ => 2 }); read_config(ui, &mut state.borrow_mut());
+            let level = match ui.get_intensity() { 2 => ("کم", "Low"), 1 => ("متوسط", "Balanced"), _ => ("زیاد", "High") };
+            if ui.get_leveling() { notify_action(ui, osd, "شدت بلندی پایدار", "Loudness intensity", level.0, level.1); }
+            else { notify_action(ui, osd, "شدت ذخیره شد", "Intensity saved", "برای اعمال، بلندی پایدار را روشن کن.", "Turn on steady loudness to apply it."); }
+        }
+        8 => {
+            if ui.get_profile() == 0 { ui.set_profile(ui.get_last_profile().clamp(1, 7)); }
+            else { ui.set_last_profile(ui.get_profile()); ui.set_profile(0); }
+            read_config(ui, &mut state.borrow_mut());
+            let profile = profile_label(ui.get_profile(), ui.get_english());
+            if ui.get_profile() == 0 { notify_action(ui, osd, "بهبود صدا خاموش", "Enhancement off", profile, profile); }
+            else if ui.get_mode() == 0 { notify_action(ui, osd, "بهبود صدا ذخیره شد", "Enhancement saved", "برای اعمال، حالت بوست کامل را فعال کن.", "Switch to Full boost mode to apply it."); }
+            else { notify_action(ui, osd, "بهبود صدا روشن", "Enhancement on", profile, profile); }
+        }
+        9 => {
+            let next = (ui.get_profile() + 1) % 8;
+            ui.set_profile(next);
+            if next != 0 { ui.set_last_profile(next); }
+            read_config(ui, &mut state.borrow_mut());
+            let label = profile_label(next, ui.get_english());
+            let detail_fa = format!("پروفایل: {label}");
+            let detail_en = format!("Profile: {label}");
+            if next != 0 && ui.get_mode() == 0 { notify_action(ui, osd, "پروفایل ذخیره شد", "Profile saved", "برای شنیدن افکت، حالت بوست کامل را فعال کن.", "Switch to Full boost mode to hear the effect."); }
+            else { notify_action(ui, osd, "پروفایل بهبود صدا", "Enhancement profile", &detail_fa, &detail_en); }
+        }
+        10 => {
+            ui.set_treble_smoothing(!ui.get_treble_smoothing()); read_config(ui, &mut state.borrow_mut());
+            if ui.get_mode() == 0 { notify_action(ui, osd, "تنظیم ذخیره شد", "Setting saved", "برای اعمال نرم‌سازی صدای زیر، حالت بوست کامل را فعال کن.", "Switch to Full boost mode to apply treble smoothing."); }
+            else if ui.get_profile() == 0 { notify_action(ui, osd, "تنظیم ذخیره شد", "Setting saved", "برای شنیدن اثر، یک پروفایل بهبود صدا انتخاب کن.", "Select an enhancement profile to hear treble smoothing."); }
+            else if ui.get_treble_smoothing() { notify_action(ui, osd, "نرم‌سازی صدای زیر روشن", "Treble smoothing on", "", ""); }
+            else { notify_action(ui, osd, "نرم‌سازی صدای زیر خاموش", "Treble smoothing off", "", ""); }
+        }
+        _ => log::warn!("Unknown global shortcut action index {action}"),
+    }
+}
+fn hotkey_names(index: usize, english: bool) -> &'static str {
+    const EN: [&str; 14] = ["Volume up", "Volume down", "Mute / restore", "Start audio", "Pause / resume", "Stop audio", "Steady loudness on/off", "Loudness intensity", "Enhancement on/off", "Cycle enhancement profile", "Treble smoothing on/off", "Media volume up", "Media volume down", "Media mute"];
+    const FA: [&str; 14] = ["افزایش ولوم", "کاهش ولوم", "قطع/وصل صدا", "اجرای صدا", "مکث/ادامه", "توقف صدا", "روشن/خاموش بلندی پایدار", "شدت بلندی پایدار", "روشن/خاموش بهبود صدا", "چرخش پروفایل بهبود", "نرم‌سازی صدای زیر", "ولوم بالای کیبورد", "ولوم پایین کیبورد", "قطع صدای کیبورد"];
+    if english { EN[index] } else { FA[index] }
+}
+fn virtual_key_name(vk: u32) -> String {
+    match vk {
+        0x21 => "PageUp".into(), 0x22 => "PageDown".into(), 0x23 => "End".into(),
+        0x24 => "Home".into(), 0x2D => "Insert".into(), 0x2E => "Delete".into(),
+        0x20 => "Space".into(), 0x0D => "Enter".into(), 0x09 => "Tab".into(),
+        0x08 => "Backspace".into(), 0x25 => "Left".into(), 0x26 => "Up".into(),
+        0x27 => "Right".into(), 0x28 => "Down".into(), 0xAF => "VolumeUp".into(),
+        0xAE => "VolumeDown".into(), 0xAD => "Mute".into(),
+        0x30..=0x39 | 0x41..=0x5A => char::from_u32(vk).unwrap().to_string(),
+        0x70..=0x87 => format!("F{}", vk - 0x6F),
+        _ => format!("VK{:02X}", vk),
+    }
+}
+fn hotkey_chord(binding: crate::settings::HotkeyBinding) -> String {
+    if !binding.enabled { return "—".into(); }
+    let mut parts: Vec<String> = Vec::new();
+    if binding.modifiers & 0x0002 != 0 { parts.push("Ctrl".into()); }
+    if binding.modifiers & 0x0001 != 0 { parts.push("Alt".into()); }
+    if binding.modifiers & 0x0004 != 0 { parts.push("Shift".into()); }
+    parts.push(virtual_key_name(binding.virtual_key));
+    parts.join("+")
+}
+fn sync_hotkey_rows(ui: &AppWindow, state: &State) {
+    let rows = state.settings.hotkeys.iter().enumerate().map(|(index, binding)| HotkeyRow {
+        name: hotkey_names(index, ui.get_english()).into(),
+        chord: hotkey_chord(*binding).into(),
+        enabled: binding.enabled,
+        error: state.hotkey_errors.iter().find(|(i, _)| *i == index).map(|(_, e)| e.as_str()).unwrap_or("").into(),
+    }).collect::<Vec<_>>();
+    ui.set_hotkey_rows(Rc::new(VecModel::from(rows)).into());
+}
+fn capture_validation(index: usize, vk: u32, modifiers: u32) -> std::result::Result<(), &'static str> {
+    if index >= crate::settings::HOTKEY_ACTION_COUNT { return Err("Invalid shortcut row"); }
+    if matches!(vk, 0x10 | 0x11 | 0x12 | 0xA0..=0xA5) { return Err("Press a non-modifier key"); }
+    if modifiers & !0x0007 != 0 { return Err("Windows-key shortcuts are not supported"); }
+    if index >= 11 {
+        if modifiers != 0 { return Err("Media volume keys cannot use modifiers"); }
+        if !matches!(vk, 0xAD | 0xAE | 0xAF) { return Err("Use a media volume key for this row"); }
+    } else {
+        if vk == 0x1B { return Err("Escape cancels recording"); }
+        if modifiers == 0 { return Err("Add Ctrl, Alt, or Shift to the shortcut"); }
+        if (modifiers & 0x0001 != 0 && matches!(vk, 0x09 | 0x73 | 0x1B | 0x20))
+            || (modifiers & 0x0002 != 0 && vk == 0x1B)
+            || (modifiers & 0x0006 == 0x0006 && vk == 0x1B)
+            || (modifiers & 0x0003 == 0x0003 && vk == 0x2E)
+        { return Err("This key combination is reserved by Windows"); }
+    }
+    Ok(())
+}
+fn cancel_capture(ui: &AppWindow, state: &Rc<RefCell<State>>, native: &Rc<RefCell<Option<native_tray::Tray>>>, index: usize) {
+    let bindings = state.borrow().settings.hotkeys.clone();
+    let errors = native.borrow_mut().as_mut().map(|tray| tray.register_hotkeys(&bindings)).unwrap_or_default();
+    state.borrow_mut().hotkey_errors = errors;
+    ui.set_hotkey_capture_index(-1);
+    sync_hotkey_rows(ui, &state.borrow());
+    if index < crate::settings::HOTKEY_ACTION_COUNT {
+        ui.set_status(if ui.get_english() { "Shortcut recording cancelled." } else { "ضبط میانبر لغو شد." }.into());
+    }
+}
+fn new_registration_failures(
+    candidate: &[crate::settings::HotkeyBinding],
+    previous: &[crate::settings::HotkeyBinding],
+    prior_errors: &[(usize, String)],
+    errors: &[(usize, String)],
+    changed_index: Option<usize>,
+) -> Vec<(usize, String)> {
+    let old_failed: std::collections::HashSet<_> = prior_errors.iter().map(|(i, _)| *i).collect();
+    errors.iter().filter(|(i, _)| {
+        changed_index == Some(*i)
+            || !old_failed.contains(i)
+            || candidate.get(*i) != previous.get(*i)
+    }).cloned().collect()
+}
+fn accept_captured_hotkey(ui: &AppWindow, state: &Rc<RefCell<State>>, native: &Rc<RefCell<Option<native_tray::Tray>>>, index: usize, vk: u32, modifiers: u32) {
+    if let Err(error) = capture_validation(index, vk, modifiers) {
+        cancel_capture(ui, state, native, index);
+        let mut s = state.borrow_mut();
+        s.hotkey_errors.retain(|(i, _)| *i != index);
+        s.hotkey_errors.push((index, error.to_string()));
+        sync_hotkey_rows(ui, &s);
+        ui.set_status(if ui.get_english() { error } else { "این ترکیب قابل استفاده نیست؛ ترکیب دیگری ضبط کن." }.into());
+        return;
+    }
+    let mut candidate = state.borrow().settings.hotkeys.clone();
+    candidate[index] = crate::settings::HotkeyBinding { enabled: true, modifiers, virtual_key: vk };
+    apply_hotkeys(ui, state, native, candidate, Some(index));
+}
+fn apply_hotkeys(
+    ui: &AppWindow,
+    state: &Rc<RefCell<State>>,
+    native: &Rc<RefCell<Option<native_tray::Tray>>>,
+    candidate: Vec<crate::settings::HotkeyBinding>,
+    changed_index: Option<usize>,
+) -> bool {
+    let previous = state.borrow().settings.hotkeys.clone();
+    let prior_errors = state.borrow().hotkey_errors.clone();
+    let mut native_ref = native.borrow_mut();
+    let Some(tray) = native_ref.as_mut() else {
+        ui.set_hotkey_capture_index(-1);
+        sync_hotkey_rows(ui, &state.borrow());
+        ui.set_status(if ui.get_english() { "Global shortcut window is unavailable." } else { "پنجرهٔ میانبرها در دسترس نیست." }.into());
+        return false;
+    };
+    let errors = tray.register_hotkeys(&candidate);
+    let new_failures = new_registration_failures(&candidate, &previous, &prior_errors, &errors, changed_index);
+    if !new_failures.is_empty() {
+        let _ = tray.register_hotkeys(&previous);
+        let mut display = prior_errors;
+        if let Some(index) = changed_index {
+            if let Some((_, message)) = new_failures.first() {
+                if !display.iter().any(|(i, _)| *i == index) {
+                    display.push((index, format!("Shortcut conflict: {message}")));
+                }
+            }
+        }
+        for failure in new_failures { if !display.iter().any(|(i, _)| *i == failure.0) { display.push(failure); } }
+        state.borrow_mut().hotkey_errors = display;
+        ui.set_hotkey_capture_index(-1);
+        sync_hotkey_rows(ui, &state.borrow());
+        ui.set_status(if ui.get_english() { "Shortcut was not saved because Windows could not register it. Choose a different combination." } else { "میانبر ذخیره نشد؛ ویندوز آن را ثبت نکرد. ترکیب دیگری انتخاب کن." }.into());
+        return false;
+    }
+    {
+        let mut s = state.borrow_mut();
+        s.settings.hotkeys = candidate;
+        s.hotkey_errors = errors;
+        s.save_at = Some(Instant::now());
+    }
+    ui.set_hotkey_capture_index(-1);
+    sync_hotkey_rows(ui, &state.borrow());
+    ui.set_status(if ui.get_english() { "Keyboard shortcuts saved." } else { "کلیدهای میانبر ذخیره شدند." }.into());
+    true
 }
 fn open(target: &str) {
     use windows::{
@@ -283,7 +564,9 @@ fn read_config(ui: &AppWindow, s: &mut State) {
     }
     s.settings.target = ui.get_target().clamp(0, max_target);
     ui.set_target(s.settings.target);
-    if s.settings.english != ui.get_english() {
+    s.settings.default_volume = ui.get_default_volume().clamp(0, 100);
+    let language_changed = s.settings.english != ui.get_english();
+    if language_changed {
         let mut labels: Vec<String> = ui.get_outputs().iter().map(|v| v.to_string()).collect();
         if let Some(first) = labels.first_mut() {
             *first = if ui.get_english() {
@@ -309,6 +592,7 @@ fn read_config(ui: &AppWindow, s: &mut State) {
     s.settings.auto_route = ui.get_auto_route();
     s.settings.debug_log = ui.get_debug_log();
     s.settings.english = ui.get_english();
+    if language_changed { sync_hotkey_rows(ui, s); }
     if let Some(id) = s.outputs.get(ui.get_output_index().max(0) as usize) {
         s.settings.output_id = id.clone();
     }
@@ -349,7 +633,7 @@ fn start_audio(ui: &AppWindow, s: &mut State) {
         }
     }
 }
-fn exit(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+fn exit(ui: &AppWindow, state: &Rc<RefCell<State>>, osd: &Rc<RefCell<Option<osd::Osd>>>) {
     let mut s = state.borrow_mut();
     if s.exiting {
         return;
@@ -358,6 +642,7 @@ fn exit(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         log::info!("Exit requested during component operation; an already launched official installer remains independent");
     }
     s.exiting = true;
+    if let Some(window) = osd.borrow().as_ref() { window.hide(); }
     s.settings.was_running = false;
     ui.set_busy(true);
     // Signal restoration immediately even if a scan/save is ahead of Exit.
@@ -379,12 +664,23 @@ fn exit(ui: &AppWindow, state: &Rc<RefCell<State>>) {
 
 fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
+    if args.get(1).is_some_and(|arg| matches!(arg.as_str(), "--ui-smoke" | "--startup-instance-idle-smoke")) {
+        // Keep the diagnostic harness from opening a blocking Windows crash dialog.
+        #[link(name = "kernel32")]
+        unsafe extern "system" { fn SetErrorMode(mode: u32) -> u32; }
+        unsafe { SetErrorMode(0x0002); }
+    }
     let data = if args.get(1).is_some_and(|a| {
         [
             "--diagnose",
             "--components-check",
             "--engine-smoke",
             "--ui-smoke",
+            "--startup-hotkey-smoke",
+            "--startup-osd-smoke",
+            "--startup-both-smoke",
+            "--startup-instance-smoke",
+            "--startup-instance-idle-smoke",
         ]
         .contains(&a.as_str())
     }) {
@@ -440,14 +736,23 @@ fn run() -> Result<()> {
         _ => (),
     }
     let smoke = args.get(1).is_some_and(|a| a == "--ui-smoke");
+    let startup_hotkey_smoke = args.get(1).is_some_and(|a| matches!(a.as_str(), "--startup-hotkey-smoke" | "--startup-both-smoke"));
+    let startup_instance_smoke = args.get(1).is_some_and(|a| a == "--startup-instance-smoke");
+    let startup_instance_idle_smoke = args.get(1).is_some_and(|a| a == "--startup-instance-idle-smoke");
+    let startup_osd_smoke = args.get(1).is_some_and(|a| matches!(a.as_str(), "--startup-osd-smoke" | "--startup-both-smoke" | "--startup-instance-smoke"));
+    let startup_hotkey_smoke = startup_hotkey_smoke || startup_instance_smoke || startup_instance_idle_smoke;
+    let startup_smoke = startup_hotkey_smoke || startup_osd_smoke || startup_instance_idle_smoke;
+    let startup_safe_probe = cfg!(debug_assertions) && std::env::var_os("MAXI_SOUNDSET_STARTUP_SAFE_PROBE").is_some();
+    let startup_probe_mode = startup_smoke || startup_safe_probe;
     let startup_launch = args.get(1).is_some_and(|a| a == "--startup");
-    let instance = if smoke { None } else { Some(Instance::new()?) };
+    let instance = if smoke || (startup_smoke && !(startup_instance_smoke || startup_instance_idle_smoke)) { None } else { Some(Instance::new()?) };
     if instance.as_ref().is_some_and(|i| !i.owner) {
         return Ok(());
     }
     let ui = AppWindow::new()?;
     set_eq_model(&ui, settings.eq_bands);
-    ui.set_target(settings.target);
+    ui.set_target(settings.default_volume);
+    ui.set_default_volume(settings.default_volume);
     ui.set_boost(settings.boost_db);
     ui.set_reaction(settings.speed);
     ui.set_intensity(settings.intensity);
@@ -488,7 +793,11 @@ fn run() -> Result<()> {
         error: None,
         audio_apps: vec![],
         conflict_scan_at: Instant::now(),
+        unmute_target: None,
+        hotkey_errors: Vec::new(),
+        hotkey_pending_audio: None,
     }));
+    let osd: Rc<RefCell<Option<osd::Osd>>> = Rc::new(RefCell::new(None));
 
     {
         let w = ui.as_weak();
@@ -726,7 +1035,7 @@ fn run() -> Result<()> {
             if let Some(u) = w.upgrade() {
                 if smoke {
                     u.set_app_update_state(2);
-                    u.set_app_latest_version("v1.0.1".into());
+                    u.set_app_latest_version("v1.0.2".into());
                     return;
                 }
                 let mut s = s.borrow_mut();
@@ -742,9 +1051,10 @@ fn run() -> Result<()> {
     {
         let w = ui.as_weak();
         let s = state.clone();
+        let osd = osd.clone();
         ui.on_exit_app(move || {
             if let Some(u) = w.upgrade() {
-                exit(&u, &s);
+                exit(&u, &s, &osd);
             }
         });
     }
@@ -754,7 +1064,7 @@ fn run() -> Result<()> {
         .borrow()
         .background
         .submit(background::Job::Initialize(data.clone()))?;
-    if !smoke {
+    if !smoke && !startup_probe_mode {
         state.borrow().background.submit(background::Job::Startup(
             state.borrow().settings.startup,
             std::env::current_exe()?,
@@ -762,10 +1072,70 @@ fn run() -> Result<()> {
     }
     // Winit creates its HWND when the event loop starts.
     let native: Rc<RefCell<Option<native_tray::Tray>>> = Rc::new(RefCell::new(None));
+    sync_hotkey_rows(&ui, &state.borrow());
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        let native = native.clone();
+        ui.on_begin_hotkey_capture(move |index| {
+            let Some(u) = weak.upgrade() else { return; };
+            if index >= 0 {
+                let mut tray_ref = native.borrow_mut();
+                let Some(tray) = tray_ref.as_mut() else {
+                    u.set_hotkey_capture_index(-1);
+                    u.set_status(if u.get_english() { "Global shortcut window is not ready yet." } else { "پنجرهٔ میانبر هنوز آماده نیست." }.into());
+                    return;
+                };
+                tray.begin_hotkey_capture(index as usize);
+                u.set_status(if u.get_english() { "Press the shortcut now. Escape cancels." } else { "میانبر را فشار بده؛ Escape لغو می‌کند." }.into());
+            } else {
+                let bindings = state.borrow().settings.hotkeys.clone();
+                let errors = native.borrow_mut().as_mut().map(|tray| tray.register_hotkeys(&bindings)).unwrap_or_default();
+                state.borrow_mut().hotkey_errors = errors;
+                u.set_hotkey_capture_index(-1);
+                sync_hotkey_rows(&u, &state.borrow());
+                u.set_status(if u.get_english() { "Shortcut recording cancelled." } else { "ضبط میانبر لغو شد." }.into());
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        let native = native.clone();
+        ui.on_set_hotkey_enabled(move |index, enabled| {
+            if !(0..crate::settings::HOTKEY_ACTION_COUNT as i32).contains(&index) { return; }
+            let Some(u) = weak.upgrade() else { return; };
+            let mut candidate = state.borrow().settings.hotkeys.clone();
+            candidate[index as usize].enabled = enabled;
+            apply_hotkeys(&u, &state, &native, candidate, Some(index as usize));
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        let native = native.clone();
+        ui.on_clear_hotkey(move |index| {
+            if !(0..crate::settings::HOTKEY_ACTION_COUNT as i32).contains(&index) { return; }
+            let Some(u) = weak.upgrade() else { return; };
+            let mut candidate = state.borrow().settings.hotkeys.clone();
+            candidate[index as usize].enabled = false;
+            apply_hotkeys(&u, &state, &native, candidate, Some(index as usize));
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        let native = native.clone();
+        ui.on_reset_hotkeys(move || {
+            let Some(u) = weak.upgrade() else { return; };
+            apply_hotkeys(&u, &state, &native, crate::settings::default_hotkeys(), None);
+        });
+    }
     {
         let native = native.clone();
+        let smoke = smoke;
         ui.window().on_close_requested(move || {
-            if native
+            if smoke || native
                 .borrow()
                 .as_ref()
                 .is_some_and(|tray| tray.is_registered())
@@ -785,6 +1155,10 @@ fn run() -> Result<()> {
             && state.borrow().settings.was_running,
     ));
     let timer = slint::Timer::default();
+    let startup_smoke_started = Instant::now();
+    let startup_smoke_finished = Rc::new(Cell::new(false));
+    let startup_smoke_probe = Rc::new(Cell::new((false, false, false)));
+    let startup_instance_active = instance.is_some();
     let logs = Rc::new(VecModel::<LogRow>::default());
     ui.set_logs(logs.clone().into());
     let log_revision = std::cell::Cell::new(u64::MAX);
@@ -795,6 +1169,11 @@ fn run() -> Result<()> {
         let startup_hidden = startup_hidden.clone();
         let startup_resume = startup_resume.clone();
         let s = state.clone();
+        let osd = osd.clone();
+        let startup_smoke_finished = startup_smoke_finished.clone();
+        let startup_smoke_probe = startup_smoke_probe.clone();
+        let startup_safe_probe = startup_safe_probe;
+        let data = data.clone();
         timer.start(
             slint::TimerMode::Repeated,
             Duration::from_millis(100),
@@ -802,10 +1181,47 @@ fn run() -> Result<()> {
                 let Some(u) = w.upgrade() else {
                     return;
                 };
+                if startup_probe_mode && !startup_smoke_finished.get() && startup_smoke_started.elapsed() >= Duration::from_secs(20) {
+                    startup_smoke_finished.set(true);
+                    let osd_ready = !startup_osd_smoke || osd.borrow().is_some();
+                    let (shell_callback, hotkey_callback, osd_visible) = startup_smoke_probe.get();
+                    let passed = shell_callback && hotkey_callback && osd_ready && (!startup_safe_probe || osd_visible);
+                    let status = if passed { "PASS" } else { "FAIL" };
+                    log::info!("STARTUP SAFE PROBE {status}: instance={startup_instance_active}, hotkeys={}, OSD={}, shell callback={shell_callback}, hotkey callback={hotkey_callback}, OSD visible={osd_visible}, UI timer responsive for 20 seconds", startup_hotkey_smoke || startup_safe_probe, startup_osd_smoke || startup_safe_probe);
+                    let _ = fs::write(data.join("startup-smoke.txt"), format!("{status}: instance={startup_instance_active}, hotkeys={}, OSD={}, shell callback={shell_callback}, hotkey callback={hotkey_callback}, OSD visible={osd_visible}, UI timer responsive for 20 seconds\n", startup_hotkey_smoke || startup_safe_probe, startup_osd_smoke || startup_safe_probe));
+                    u.invoke_exit_app();
+                }
                 if native.borrow().is_none() && tray_retry.get().elapsed() >= Duration::from_secs(5) {
                     tray_retry.set(Instant::now());
                     match native_tray::Tray::new() {
-                        Ok(tray) => *native.borrow_mut() = Some(tray),
+                        Ok(mut tray) => {
+                            let failures = if (smoke || startup_smoke) && !startup_hotkey_smoke { Vec::new() } else { tray.register_hotkeys(&s.borrow().settings.hotkeys) };
+                            for (index, error) in &failures { log::error!("Global shortcut {index} registration failed: {error}"); }
+                            if startup_probe_mode {
+                                let (shell_callback, hotkey_callback) = tray.probe_callback_messages(startup_hotkey_smoke);
+                                startup_smoke_probe.set((shell_callback, hotkey_callback, false));
+                                log::info!("Startup callback probe: shell={shell_callback}, hotkey={hotkey_callback}");
+                            }
+                            s.borrow_mut().hotkey_errors = failures;
+                            sync_hotkey_rows(&u, &s.borrow());
+                    if startup_osd_smoke || startup_safe_probe {
+                                match osd::Osd::new() {
+                                    Ok(window) => {
+                                        if startup_probe_mode && (startup_osd_smoke || startup_safe_probe) {
+                                            window.show("Startup verification", "Temporary isolated launch", false);
+                                            let visible = window.query_visibility(Duration::from_secs(1)) == Some(true);
+                                            let (shell, hotkey, _) = startup_smoke_probe.get();
+                                            startup_smoke_probe.set((shell, hotkey, visible));
+                                            log::info!("Startup OSD probe: HWND visible={visible}");
+                                        }
+                                        log::debug!("Background OSD initialized on its message thread");
+                                        *osd.borrow_mut() = Some(window);
+                                    },
+                                    Err(e) => log::error!("Background OSD initialization: {e:#}"),
+                                }
+                            }
+                            *native.borrow_mut() = Some(tray);
+                        },
                         Err(e) => {
                             log::error!("Native tray initialization: {e:#}");
                             u.set_status(format!("{e:#}").into());
@@ -827,6 +1243,9 @@ fn run() -> Result<()> {
                         native_tray::Action::Show => show(&u),
                         native_tray::Action::Repaint => { if u.window().is_visible() { window_repaint::full_redraw(u.window()); } }
                         native_tray::Action::Pause => u.invoke_toggle_pause(),
+                        native_tray::Action::Hotkey(index) => handle_hotkey(&u, &s, &osd, index),
+                        native_tray::Action::CapturedHotkey(index, vk, modifiers) => accept_captured_hotkey(&u, &s, &native, index, vk, modifiers),
+                        native_tray::Action::CaptureCancelled(index) => cancel_capture(&u, &s, &native, index),
                         native_tray::Action::Target(v) => {
                             u.set_target(v);
                             u.invoke_config_changed();
@@ -882,6 +1301,9 @@ fn run() -> Result<()> {
                 {
                     startup_resume.set(false);
                     log::info!("Windows startup: resuming the last active audio configuration");
+                    let default_volume = s.settings.default_volume;
+                    s.settings.target = default_volume;
+                    u.set_target(default_volume);
                     start_audio(&u, &mut s);
                 }
                 if s.conflict_scan_at.elapsed() >= Duration::from_secs(5) {
@@ -890,6 +1312,8 @@ fn run() -> Result<()> {
                 for event in s.engine.poll() {
                     match event {
                         AudioEvent::Started => {
+                            let from_hotkey = s.hotkey_pending_audio == Some(HotkeyPendingAudio::Start);
+                            if from_hotkey { s.hotkey_pending_audio = None; }
                             u.set_running(true);
                             u.set_busy(false);
                             u.set_paused(false);
@@ -897,8 +1321,11 @@ fn run() -> Result<()> {
                                 s.settings.was_running = true;
                                 s.save_at = Some(Instant::now());
                             }
+                            if from_hotkey { notify_action(&u, &osd, "صدا آماده است", "Audio started", "پردازش صدا با موفقیت آغاز شد.", "Audio processing is ready."); }
                         }
                         AudioEvent::Stopped => {
+                            let from_hotkey = s.hotkey_pending_audio == Some(HotkeyPendingAudio::Stop);
+                            if from_hotkey { s.hotkey_pending_audio = None; }
                             u.set_running(false);
                             u.set_busy(false);
                             u.set_paused(false);
@@ -906,12 +1333,15 @@ fn run() -> Result<()> {
                                 s.settings.was_running = false;
                                 s.save_at = Some(Instant::now());
                             }
+                            if from_hotkey { notify_action(&u, &osd, "صدا متوقف شد", "Audio stopped", "دستگاه صوتی بازگردانی شد.", "The audio device has been restored."); }
                         }
                         AudioEvent::Error(e) | AudioEvent::RestoreWarning(e) => {
+                            let from_hotkey = s.hotkey_pending_audio.take().is_some();
                             u.set_audio_error(e.clone().into());
                             s.error = Some(e.clone());
-                            u.set_status(e.into());
-                            show(&u);
+                            u.set_status(e.clone().into());
+                            if from_hotkey { notify_action(&u, &osd, "عملیات صدا ناموفق بود", "Audio action failed", &e, &e); }
+                            else { show(&u); }
                         }
                     }
                 }
@@ -1083,6 +1513,7 @@ fn run() -> Result<()> {
                     u.get_paused(),
                     u.get_target(),
                     u.get_english(),
+                    u.get_mode() == 0,
                 ); }
             },
         );
@@ -1107,12 +1538,14 @@ fn run() -> Result<()> {
     }
     let smoke_timer = slint::Timer::default();
     if smoke {
+        log::info!("UI smoke timer scheduled");
         let w = ui.as_weak();
         let native = native.clone();
+        let osd = osd.clone();
         let directory = data.clone();
         let step = Rc::new(RefCell::new(0));
         let cable_before_warning = std::cell::Cell::new(false);
-        smoke_timer.start(slint::TimerMode::Repeated, Duration::from_millis(1600), move || { let Some(u) = w.upgrade() else { return; }; let mut step = step.borrow_mut(); let result = (|| -> Result<()> { match *step {
+        smoke_timer.start(slint::TimerMode::Repeated, Duration::from_millis(1600), move || { let Some(u) = w.upgrade() else { return; }; let mut step = step.borrow_mut(); log::info!("UI smoke step {step}"); let result = (|| -> Result<()> { match *step {
         0 => { anyhow::ensure!(u.get_devices_ready() && u.get_recovery_ready(), "Startup initialization did not finish"); anyhow::ensure!(u.get_sidebar_brand_text() == "مکسی سَوندسِت" && u.get_log_label() == "لاگ" && u.get_gain_label() == "بهره صدا", "Persian localization labels changed"); cable_before_warning.set(u.get_cable_installed()); u.set_cable_installed(false); anyhow::ensure!(u.get_cable_warning_visible(), "Missing cable warning absent"); snapshot_png(&u, &directory.join("Cable-Warning-FA.png"))?; anyhow::ensure!(u.get_sidebar_on_right(), "Persian sidebar is not on the right"); snapshot_png(&u, &directory.join("Sound-FA.png"))?; },
         1 => { u.set_english(true); u.invoke_config_changed(); anyhow::ensure!(u.get_sidebar_brand_text() == "MAXI\nSOUNDSET" && u.get_log_label() == "Log" && u.get_gain_label() == "GAIN", "English localization labels changed"); anyhow::ensure!(u.get_outputs().row_data(0).unwrap() == "System default", "Default output label did not translate"); u.set_page(1); }, 2 => { anyhow::ensure!(!u.get_sidebar_on_right(), "English sidebar did not move left"); snapshot_png(&u, &directory.join("Components.png"))?; u.set_cable_installed(cable_before_warning.get()); },
         3 => u.set_page(2), 4 => snapshot_png(&u, &directory.join("Log.png"))?,
@@ -1126,10 +1559,10 @@ fn run() -> Result<()> {
         12 => { snapshot_png(&u, &directory.join("Collapsed.png"))?; u.set_sidebar_expanded(true); u.set_mode(1); u.invoke_enter_target_text("200".into()); u.set_page(0); u.invoke_config_changed(); anyhow::ensure!(u.get_target()==200, "Full mode cannot select 200"); },
         13 => { anyhow::ensure!(!u.get_enhancement_hint_visible(), "Virtual cable mode retained the switch-mode hint"); anyhow::ensure!(u.get_exact_target_text()=="200","Full exact field differs from target"); snapshot_png(&u, &directory.join("Sound-Profiles-Full-FA.png"))?; anyhow::ensure!(Settings::load(&directory).profile == 1, "Gentle profile was not saved"); u.invoke_preview_routing_help(); },
 
-        14 => { snapshot_png(&u, &directory.join("Routing-Help-FA.png"))?; u.invoke_close_routing_help(); u.set_page(4); u.set_leveling(false); u.set_intensity(2); u.set_treble_smoothing(false); u.set_target(0); u.invoke_config_changed(); u.set_startup(false); u.invoke_startup_changed(); u.set_startup(true); u.invoke_startup_changed(); u.set_startup_active(true); u.invoke_config_changed(); },
-        15 => { let saved = Settings::load(&directory); anyhow::ensure!(!saved.leveling && saved.intensity == 2 && !saved.treble_smoothing && saved.target == 0 && saved.profile == 1 && saved.startup && saved.startup_active, "Independent features/intensity/smoothing/startup settings did not persist"); snapshot_png(&u, &directory.join("Settings-FA.png"))?; u.invoke_choose_profile(6); },
-        16 => { anyhow::ensure!(Settings::load(&directory).profile == 6 && !u.get_leveling(), "Gaming profile depends on leveling"); u.set_page(6); },
-        17 => { anyhow::ensure!(u.get_app_version() == "1.0.1", "About version mismatch"); u.invoke_check_app_update(); anyhow::ensure!(u.get_app_update_state() == 2 && u.get_app_latest_version() == "v1.0.1", "About current-version state failed"); snapshot_png(&u, &directory.join("About-FA.png"))?; u.set_app_update_state(4); u.set_app_latest_version("verification network error".into()); snapshot_png(&u, &directory.join("About-Update-Error-FA.png"))?; u.set_english(true); u.set_app_update_state(3); u.set_app_latest_version("v1.0.2".into()); },
+        14 => { snapshot_png(&u, &directory.join("Routing-Help-FA.png"))?; u.invoke_close_routing_help(); window_repaint::resize_logically(u.window(), 1120., 760.); u.set_page(4); u.set_leveling(false); u.set_intensity(2); u.set_treble_smoothing(false); u.set_target(0); u.invoke_config_changed(); u.set_startup(false); u.invoke_startup_changed(); u.set_startup(true); u.invoke_startup_changed(); u.set_startup_active(true); u.invoke_config_changed(); },
+        15 => { let saved = Settings::load(&directory); anyhow::ensure!(!saved.leveling && saved.intensity == 2 && !saved.treble_smoothing && saved.target == 0 && saved.profile == 1 && saved.startup && saved.startup_active, "Independent features/intensity/smoothing/startup settings did not persist"); u.invoke_scroll_settings_to(0.); snapshot_png(&u, &directory.join("Settings-FA-Top-Min.png"))?; u.set_english(true); u.invoke_config_changed(); snapshot_png(&u, &directory.join("Settings-EN-Top-Min.png"))?; u.set_english(false); u.invoke_config_changed(); u.invoke_scroll_settings_to(500.); },
+        16 => { snapshot_png(&u, &directory.join("Settings-Shortcuts-FA-Min.png"))?; u.set_english(true); u.invoke_config_changed(); snapshot_png(&u, &directory.join("Settings-Shortcuts-EN-Min.png"))?; u.set_english(false); u.invoke_config_changed(); u.invoke_scroll_settings_to(0.); anyhow::ensure!(Settings::load(&directory).profile == 1 && !u.get_leveling(), "Settings changed during shortcut visual verification"); u.invoke_choose_profile(6); u.set_page(6); },
+        17 => { anyhow::ensure!(u.get_app_version() == "1.0.2", "About version mismatch"); u.invoke_check_app_update(); anyhow::ensure!(u.get_app_update_state() == 2 && u.get_app_latest_version() == "v1.0.2", "About current-version state failed"); snapshot_png(&u, &directory.join("About-FA.png"))?; u.set_app_update_state(4); u.set_app_latest_version("verification network error".into()); snapshot_png(&u, &directory.join("About-Update-Error-FA.png"))?; u.set_english(true); u.set_app_update_state(3); u.set_app_latest_version("v1.0.3".into()); },
         18 => { snapshot_png(&u, &directory.join("About-EN.png"))?; u.set_english(false); u.set_page(5); u.invoke_refresh_conflicts(); },
         19 => { snapshot_png(&u, &directory.join("Conflicts-FA.png"))?; u.set_conflicts(Rc::new(VecModel::from(vec![ConflictRow { pid: 12345, name: "FxSound · verification preview".into(), exe: "FxSound.exe".into() }])).into()); },
         20 => { snapshot_png(&u, &directory.join("Conflicts-Warning.png"))?; u.invoke_end_conflict(12345); u.set_leveling(true); u.invoke_set_enhancement(false); u.invoke_config_changed(); u.set_page(0); },
@@ -1144,7 +1577,10 @@ fn run() -> Result<()> {
         29 => { u.set_volume_notice("".into()); u.set_mode(1); u.set_target(200); u.invoke_config_changed(); u.invoke_preview_profile_menu(); },
         30 => { snapshot_png(&u,&directory.join("Profile-Menu-EN.png"))?; u.invoke_close_profile_menu(); u.set_english(false); u.invoke_config_changed(); },
         31 => { anyhow::ensure!(u.get_target()==200 && Settings::load(&directory).target==200,"Full target200 not retained"); snapshot_png(&u,&directory.join("Sound-200-FA.png"))?; },
-        32 => { let registered = native.borrow().as_ref().is_some_and(|tray| tray.is_registered()); fs::write(directory.join("ui-smoke.txt"), format!("PASS: Slint 1.18.0 FA/EN RTL sidebar and row ordering; Sound/profiles/settings/conflicts/About/components/log/dropdown/collapsed/minimum-window rendering; profile 0/1/6/7, steadying intensity and optional treble smoothing persist; routing help popup with explicit close control and treble-reduction meter render; Persian/English sidebar icons remain anchored throughout collapse/expand animation; Donate action and startup audio-resume preference render; custom 10-band EQ and reset persist independently; English System default updates on language switch; manual volume/boost, leveling and enhancement independently enabled; remembered profile; startup preferences persist without touching host registry; About Rust/Slint logo credits, v1.0.1 branding, localized update states including error/log access, and compact website/report/license actions; aligned Log controls with regular spacing; proportional header fully fills available width with Playback 20% narrower than Processing; no host app termination; Windows mode max100 and full mode 0/200; custom EQ FA/EN/minimum size; native Close hides; native tray Show/Exit dispatch\nNotification-area registration: {}\n", if registered { "PASS" } else { "UNVERIFIED: rejected by this sandboxed Windows session" }))?; u.invoke_exit_app(); }, _ => () } Ok(()) })(); if let Err(e) = result { log::error!("UI smoke: {e:#}"); let _ = fs::write(directory.join("ui-smoke.txt"), format!("FAIL {e:#}")); let _ = slint::quit_event_loop(); } *step += 1; });
+        32 => { let _ = u.hide(); },
+        33 => { anyhow::ensure!(!u.window().is_visible(), "UI smoke window remained visible after hide"); notify_action(&u, &osd, "اعلان آزمایشی", "Synthetic test notice", "اعلان پس‌زمینه", "Synthetic background notice"); },
+        34 => { anyhow::ensure!(osd.borrow().as_ref().is_some_and(|window| window.is_visible() && window.query_visibility(Duration::from_millis(800)) == Some(true)), "Lazy OSD HWND was not visible or its worker did not answer within 800 ms"); },
+        35 => { anyhow::ensure!(osd.borrow().as_ref().is_some_and(|window| !window.is_visible() && window.query_visibility(Duration::from_millis(800)) == Some(false)), "OSD did not auto-hide or its worker did not answer within 800 ms"); let registered = native.borrow().as_ref().is_some_and(|tray| tray.is_registered()); fs::write(directory.join("ui-smoke.txt"), format!("PASS: Slint 1.18.0 FA/EN RTL sidebar and row ordering; Sound/profiles/settings/conflicts/About/components/log/dropdown/collapsed/minimum-window rendering; profile 0/1/6/7, steadying intensity and optional treble smoothing persist; routing help popup with explicit close control and treble-reduction meter render; Persian/English sidebar icons remain anchored throughout collapse/expand animation; Donate action and startup audio-resume preference render; custom 10-band EQ and reset persist independently; English System default updates on language switch; manual volume/boost, leveling and enhancement independently enabled; remembered profile; startup preferences persist without touching host registry; About Rust/Slint logo credits, v{} branding, localized update states including error/log access, and compact website/report/license actions; aligned Log controls with regular spacing; proportional header fully fills available width with Playback 20% narrower than Processing; no host app termination; Windows mode max100 and full mode 0/200; custom EQ FA/EN/minimum size; native Close hides; native tray Show/Exit dispatch; lazy synthetic layered OSD appeared, remained visible, then auto-hid\nNotification-area registration: {}\n", env!("CARGO_PKG_VERSION"), if registered { "PASS" } else { "UNVERIFIED: rejected by this sandboxed Windows session" }))?; u.invoke_exit_app(); }, _ => () } Ok(()) })(); if let Err(e) = result { log::error!("UI smoke: {e:#}"); let _ = fs::write(directory.join("ui-smoke.txt"), format!("FAIL {e:#}")); u.invoke_exit_app(); } *step += 1; });
     }
     slint::run_event_loop_until_quit()?;
     state.borrow_mut().engine.shutdown()?;
@@ -1435,6 +1871,44 @@ fn engine_smoke(data: &Path) -> Result<()> {
     );
     fs::write(data.join("engine-smoke.txt"), "PASS: native Windows endpoint control; targets100/50 use the common loudness scale and native actuator stays in range; target 0 mutes; returning to100 restores native gain; pause/resume; leveling off at target 0 restores volume; stop restores volume, mute and default output; actual VB-CABLE capture and physical render worker starts at target 0 with leveling off/profile on; profiles 1/7/0 and custom EQ +4.5dB, independent feature switching, pause and shutdown run without errors; manual routing preserves all three Windows defaults. Isolated440Hz tone verifies native target100/50 within1dB and pre-volume loopback remains stable within0.3dB. Physical output headroom is reserved only for active nonzero leveling and released on pause/off/stop; profile-only and zero target leave master volume unchanged. No listening assessment or measured hardware frequency response.\n")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod hotkey_capture_tests {
+    use super::*;
+
+    #[test]
+    fn capture_rejects_modifier_only_and_windows_reserved_chords() {
+        assert!(capture_validation(0, 0x11, 0x0002).is_err());
+        assert!(capture_validation(0, 0x09, 0x0001).is_err()); // Alt+Tab
+        assert!(capture_validation(3, 0x73, 0x0001).is_err()); // Alt+F4
+        assert!(capture_validation(3, 0x2E, 0x0003).is_err()); // Ctrl+Alt+Delete
+        assert!(capture_validation(3, 0x51, 0x0003).is_ok()); // Ctrl+Alt+Q
+    }
+
+    #[test]
+    fn media_rows_accept_only_unmodified_volume_keys() {
+        assert!(capture_validation(11, 0xAF, 0).is_ok());
+        assert!(capture_validation(12, 0x41, 0).is_err());
+        assert!(capture_validation(13, 0xAD, 0x0002).is_err());
+        assert!(capture_validation(14, 0xAD, 0).is_err());
+    }
+
+    #[test]
+    fn rollback_policy_allows_old_failures_but_rejects_new_or_changed_binding_failures() {
+        let previous = crate::settings::default_hotkeys();
+        let old_error = vec![(2, "external conflict".to_string())];
+        let candidate = previous.clone();
+        assert!(new_registration_failures(&candidate, &previous, &old_error, &old_error, Some(4)).is_empty());
+
+        let mut changed = previous.clone();
+        changed[2].virtual_key = b'X' as u32;
+        assert_eq!(new_registration_failures(&changed, &previous, &old_error, &old_error, None).len(), 1);
+
+        let fresh = vec![(4, "Windows rejected it".to_string())];
+        assert_eq!(new_registration_failures(&candidate, &previous, &[], &fresh, None).len(), 1);
+        assert_eq!(new_registration_failures(&candidate, &previous, &[], &fresh, Some(4)).len(), 1);
+    }
 }
 struct Instance {
     mutex: windows::Win32::Foundation::HANDLE,

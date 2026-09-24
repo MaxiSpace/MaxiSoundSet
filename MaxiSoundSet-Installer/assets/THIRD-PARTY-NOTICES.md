@@ -1,6 +1,6 @@
 # Third-party dependency inventory
 
-This inventory records fetched dependencies selected from Cargo.lock, including optional and build dependencies; not every listed package is linked in the Windows executable. License and copyright files included in the fetched crate packages are preserved under licenses/rust-dependencies. Applications use Slint under the Slint Royalty-free Desktop, Mobile, and Web Applications License 2.0; its official AboutSlint widget is accessible from the top-level Components page.
+This inventory records fetched dependencies selected from Cargo.lock, including optional and build dependencies; not every listed package is linked in the Windows executable. Upstream links identify each dependency and its license sources; the application source does not vendor fetched crate packages. Applications use Slint under the Slint Royalty-free Desktop, Mobile, and Web Applications License 2.0; its official AboutSlint widget is accessible from the top-level Components page.
 
 Maxi Sound Set source is licensed under GNU GPL v3. FXSound artwork and code are not included. VB-CABLE is downloaded separately from its official vendor website and is subject to the vendor terms shown by its independent installer.
 

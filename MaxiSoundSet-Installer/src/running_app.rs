@@ -133,7 +133,9 @@ pub fn close(root: &Path) -> Result<()> {
         }
         true.into()
     }
-    let deadline = Instant::now() + Duration::from_secs(15);
+    // A freshly launched process may still be completing its first device scan while the
+    // installer requests shutdown. Give the cooperative path time to restore audio and exit.
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let mut waiting = false;
         for process in &processes {

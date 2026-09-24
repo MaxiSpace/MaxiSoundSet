@@ -1,5 +1,6 @@
 use anyhow::{ensure, Context, Result};
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     ptr,
@@ -65,6 +66,10 @@ pub struct Value {
     bytes: Vec<u8>,
 }
 fn raw(key: &str, name: &str) -> Result<Option<Value>> {
+    if emulated_registry() {
+        let key = key_path(key);
+        return Ok(TEST_REGISTRY.with(|r| r.borrow().get(&(key, name.to_owned())).cloned()));
+    }
     let Some(k) = open(key, false)? else {
         return Ok(None);
     };
@@ -101,6 +106,18 @@ fn raw(key: &str, name: &str) -> Result<Option<Value>> {
     Ok(Some(Value { kind, bytes }))
 }
 fn put(key: &str, name: &str, value: Option<&Value>) -> Result<()> {
+    if emulated_registry() {
+        let key = key_path(key);
+        TEST_REGISTRY.with(|r| {
+            let mut registry = r.borrow_mut();
+            if let Some(value) = value {
+                registry.insert((key, name.to_owned()), value.clone());
+            } else {
+                registry.remove(&(key, name.to_owned()));
+            }
+        });
+        return Ok(());
+    }
     let Some(k) = open(key, true)? else {
         return Ok(());
     };
@@ -229,12 +246,16 @@ pub fn register(root: &Path, version: &str, startup: bool, size: u32) -> Result<
 }
 pub fn unregister(root: &Path) -> Result<()> {
     if text(UNINSTALL_KEY, "InstallLocation")?.is_some_and(|s| same(Path::new(&s), root)) {
-        unsafe {
-            RegDeleteTreeW(
-                HKEY_CURRENT_USER,
-                PCWSTR(wide(key_path(UNINSTALL_KEY)).as_ptr()),
-            )
-            .ok()?
+        if emulated_registry() {
+            delete_key(UNINSTALL_KEY)?;
+        } else {
+            unsafe {
+                RegDeleteTreeW(
+                    HKEY_CURRENT_USER,
+                    PCWSTR(wide(key_path(UNINSTALL_KEY)).as_ptr()),
+                )
+                .ok()?
+            }
         }
     }
     if text(RUN_KEY, "MaxiSoundSet")?.is_some_and(|s| {
@@ -295,6 +316,13 @@ pub fn shortcut_paths(desktop: bool) -> Result<Vec<(PathBuf, String)>> {
     Ok(v)
 }
 pub fn shortcut(path: &Path, target: &Path) -> Result<()> {
+    // Keep the integration harness inside its private filesystem scope. Shell Link COM can be
+    // blocked by restricted Windows sessions, while the test only needs to verify ownership
+    // and target selection. Production installs continue through the native COM implementation.
+    if is_test_path(path) {
+        fs::write(path, target.to_string_lossy().as_bytes())?;
+        return Ok(());
+    }
     let link: IShellLinkW = unsafe { CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)? };
     unsafe {
         link.SetPath(PCWSTR(wide(target).as_ptr()))?;
@@ -308,6 +336,9 @@ pub fn shortcut(path: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 pub fn shortcut_target(path: &Path) -> Result<PathBuf> {
+    if is_test_path(path) {
+        return Ok(PathBuf::from(fs::read_to_string(path)?));
+    }
     let link: IShellLinkW = unsafe { CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)? };
     let persist: IPersistFile = link.cast()?;
     unsafe { persist.Load(PCWSTR(wide(path).as_ptr()), STGM_READ)? };
@@ -344,7 +375,14 @@ pub fn preflight_shortcuts(paths: &[(PathBuf, String)], root: &Path) -> Result<(
     Ok(())
 }
 
-thread_local! {static TEST_SCOPE:std::cell::RefCell<Option<(String,PathBuf)>>=const{std::cell::RefCell::new(None)};}
+thread_local! {
+    static TEST_SCOPE: std::cell::RefCell<Option<(String, PathBuf)>> = const { std::cell::RefCell::new(None) };
+    static TEST_REGISTRY: std::cell::RefCell<HashMap<(String, String), Value>> = std::cell::RefCell::new(HashMap::new());
+    static TEST_NATIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+fn emulated_registry() -> bool {
+    TEST_SCOPE.with(|s| s.borrow().is_some()) && !TEST_NATIVE.with(std::cell::Cell::get)
+}
 fn key_path(key: &str) -> String {
     TEST_SCOPE.with(|s| {
         if let Some((prefix, _)) = &*s.borrow() {
@@ -363,30 +401,65 @@ fn key_path(key: &str) -> String {
 fn test_folder(name: &str) -> Option<PathBuf> {
     TEST_SCOPE.with(|s| s.borrow().as_ref().map(|(_, p)| p.join(name)))
 }
+fn is_test_path(path: &Path) -> bool {
+    !TEST_NATIVE.with(std::cell::Cell::get) && TEST_SCOPE.with(|s| {
+        s.borrow()
+            .as_ref()
+            .is_some_and(|(_, root)| path.starts_with(root))
+    })
+}
 fn delete_key(key: &str) -> Result<()> {
+    if emulated_registry() {
+        let key = key_path(key);
+        let prefix = format!("{}\\", key.to_ascii_lowercase());
+        TEST_REGISTRY.with(|r| {
+            r.borrow_mut().retain(|(candidate, _), _| {
+                let candidate = candidate.to_ascii_lowercase();
+                candidate != key.to_ascii_lowercase() && !candidate.starts_with(&prefix)
+            });
+        });
+        return Ok(());
+    }
     let result = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, PCWSTR(wide(key_path(key)).as_ptr())) };
     if result != ERROR_FILE_NOT_FOUND {
         result.ok()?
     }
     Ok(())
 }
-pub struct TestScope(String);
+pub struct TestScope {
+    prefix: String,
+    path: PathBuf,
+    native: bool,
+}
 impl TestScope {
-    pub fn new(path: &Path) -> Result<Self> {
+    pub fn new(path: &Path, native: bool) -> Result<Self> {
         let prefix = format!(
             "Software\\MAXISOUNDSETInstallerTests\\{}",
             crate::operations::nonce()
         );
         TEST_SCOPE.with(|s| *s.borrow_mut() = Some((prefix.clone(), path.into())));
-        Ok(Self(prefix))
+        TEST_REGISTRY.with(|r| r.borrow_mut().clear());
+        TEST_NATIVE.with(|value| value.set(native));
+        Ok(Self {
+            prefix,
+            path: path.into(),
+            native,
+        })
     }
 }
 impl Drop for TestScope {
     fn drop(&mut self) {
-        unsafe {
-            let _ = RegDeleteTreeW(HKEY_CURRENT_USER, PCWSTR(wide(&self.0).as_ptr()));
+        if self.native {
+            unsafe {
+                let _ = RegDeleteTreeW(HKEY_CURRENT_USER, PCWSTR(wide(&self.prefix).as_ptr()));
+            }
         }
         TEST_SCOPE.with(|s| *s.borrow_mut() = None);
+        TEST_REGISTRY.with(|r| r.borrow_mut().clear());
+        TEST_NATIVE.with(|value| value.set(false));
+        for folder in ["Desktop", "Programs"] {
+            let _ = fs::remove_dir_all(self.path.join(folder));
+        }
     }
 }
 pub fn test_set_startup(s: &str) -> Result<()> {

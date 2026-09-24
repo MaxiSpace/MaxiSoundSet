@@ -4,7 +4,7 @@
 
 **پردازش هوشمند و کنترل تطبیقی بلندی صدا برای ویندوز**
 
-[![نسخه](https://img.shields.io/badge/انتشار-v1.0.1-2ea44f?style=for-the-badge&logo=github)](../../releases)
+[![نسخه](https://img.shields.io/badge/انتشار-v1.0.2-2ea44f?style=for-the-badge&logo=github)](../../releases)
 [![Rust](https://img.shields.io/badge/Rust-black?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Slint](https://img.shields.io/badge/Slint-UI-27ae60?style=for-the-badge)](https://slint.dev/)
 [![سیستم‌عامل](https://img.shields.io/badge/پلتفرم-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://microsoft.com/windows)
@@ -23,13 +23,13 @@
 
 <div align="center">
 
-[![دانلود مکسی سوندست](https://img.shields.io/badge/دانلود-MAXI--SOUNDSET--v1.0.1--Setup.exe-success?style=for-the-badge&logo=windows&logoColor=white)](../../releases)
+[![دانلود مکسی سوندست](https://img.shields.io/badge/دانلود-MAXI--SOUNDSET--v1.0.2--Setup.exe-success?style=for-the-badge&logo=windows&logoColor=white)](../../releases)
 
 *سازگار با ویندوز ۱۰ و ۱۱ (نسخهٔ ۶۴ بیتی)*
 
 </div>
 
-۱. فایل نصبی **`MAXI-SOUNDSET-v1.0.1-Setup.exe`** را از صفحهٔ [انتشارها (Releases)](../../releases) دریافت کنید.  
+۱. فایل نصبی **`MAXI-SOUNDSET-v1.0.2-Setup.exe`** را از صفحهٔ [انتشارها (Releases)](../../releases) دریافت کنید.
 ۲. فایل را اجرا کرده و مراحل نصب را تکمیل کنید.  
 ۳. برنامه پس از نصب به‌صورت مستقیم از پوشهٔ محل نصب نیز قابل اجرا است.
 

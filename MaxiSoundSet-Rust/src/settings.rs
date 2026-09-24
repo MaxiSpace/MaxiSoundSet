@@ -9,7 +9,10 @@ use std::{
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    #[serde(default = "default_hotkeys")]
+    pub hotkeys: Vec<HotkeyBinding>,
     pub target: i32,
+    pub default_volume: i32,
     pub boost_db: i32,
     pub speed: i32,
     pub intensity: i32,
@@ -31,7 +34,9 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            target: 100,
+            hotkeys: default_hotkeys(),
+            target: 50,
+            default_volume: 50,
             boost_db: 24,
             speed: 1,
             intensity: 1,
@@ -52,14 +57,54 @@ impl Default for Settings {
         }
     }
 }
+
+/// A persisted Win32 virtual-key chord. Modifier bits use the MOD_* values from
+/// Windows; keeping this independent of UI types makes settings backward compatible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HotkeyBinding {
+    pub enabled: bool,
+    pub modifiers: u32,
+    pub virtual_key: u32,
+}
+
+pub const HOTKEY_ACTION_COUNT: usize = 14;
+pub fn default_hotkeys() -> Vec<HotkeyBinding> {
+    const ALT: u32 = 0x0001;
+    const CTRL: u32 = 0x0002;
+    const SHIFT: u32 = 0x0004;
+    let chords = [
+        (ALT, 0x21), // PageUp: target up
+        (ALT, 0x22), // PageDown: target down
+        (ALT, 0x23), // End: mute
+        (ALT, 0x2D), // Insert: run
+        (ALT, 0x24), // Home: pause/resume
+        (ALT, 0x2E), // Delete: stop
+        (CTRL | ALT, b'L' as u32),
+        (CTRL | SHIFT, b'L' as u32),
+        (CTRL | ALT, b'E' as u32),
+        (CTRL | SHIFT, b'E' as u32),
+        (CTRL | ALT, b'T' as u32),
+        (0, 0xAF), // VK_VOLUME_UP
+        (0, 0xAE), // VK_VOLUME_DOWN
+        (0, 0xAD), // VK_VOLUME_MUTE
+    ];
+    chords.into_iter().map(|(modifiers, virtual_key)| HotkeyBinding {
+        enabled: true, modifiers, virtual_key,
+    }).collect()
+}
 impl Settings {
     pub fn load(data: &Path) -> Self {
         let mut s: Self = fs::read(data.join("settings.json"))
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
+        if s.hotkeys.len() != HOTKEY_ACTION_COUNT {
+            // A malformed/older partial list must not silently shift action IDs.
+            s.hotkeys = default_hotkeys();
+        }
         s.mode = s.mode.clamp(0, 1);
         s.target = s.target.clamp(0, if s.mode == 0 { 100 } else { 200 });
+        s.default_volume = s.default_volume.clamp(0, 100);
         for gain in &mut s.eq_bands {
             *gain = if gain.is_finite() {
                 gain.clamp(-12., 12.)
@@ -135,6 +180,7 @@ mod tests {
         s.save(&data).unwrap();
         let loaded = Settings::load(&data);
         assert_eq!(loaded.target, 100);
+        assert_eq!(loaded.default_volume, 50);
         assert_eq!(loaded.profile, 7);
         assert_eq!(loaded.eq_bands, [12.; 10]);
         let s = Settings {
@@ -170,5 +216,35 @@ mod tests {
         let bypass = Settings { profile: 0, ..old };
         let saved = serde_json::to_string(&bypass).unwrap();
         assert_eq!(serde_json::from_str::<Settings>(&saved).unwrap().profile, 0);
+        let old_without_hotkeys: Settings = serde_json::from_str(r#"{"target":44}"#).unwrap();
+        assert_eq!(old_without_hotkeys.hotkeys, default_hotkeys());
+    }
+
+    #[test]
+    fn global_hotkey_defaults_are_stable_and_round_trip() {
+        let defaults = default_hotkeys();
+        assert_eq!(defaults.len(), HOTKEY_ACTION_COUNT);
+        assert_eq!((defaults[0].modifiers, defaults[0].virtual_key), (1, 0x21));
+        assert_eq!((defaults[10].modifiers, defaults[10].virtual_key), (3, b'T' as u32));
+        assert_eq!((defaults[11].modifiers, defaults[11].virtual_key), (0, 0xAF));
+        let settings = Settings { hotkeys: defaults.clone(), ..Settings::default() };
+        let restored: Settings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(restored.hotkeys, defaults);
+    }
+
+    #[test]
+    fn default_volume_is_independent_clamped_and_persisted() {
+        let data = std::env::temp_dir().join(format!("maxi-default-volume-{}", std::process::id()));
+        let s = Settings { target: 20, default_volume: 20, ..Settings::default() };
+        s.save(&data).unwrap();
+        let loaded = Settings::load(&data);
+        assert_eq!(loaded.target, 20);
+        assert_eq!(loaded.default_volume, 20);
+
+        let invalid = Settings { default_volume: 150, ..loaded };
+        invalid.save(&data).unwrap();
+        assert_eq!(Settings::load(&data).default_volume, 100);
+        std::fs::remove_file(data.join("settings.json")).unwrap();
+        std::fs::remove_dir(data).unwrap();
     }
 }

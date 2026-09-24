@@ -7,6 +7,7 @@ export struct EqBand { frequency: string, gain: float }
 export struct LevelPoint { input: float, output: float }
 export struct ConflictRow { pid: int, name: string, exe: string }
 export struct LogRow { time: string, level: string, message: string }
+export struct HotkeyRow { name: string, chord: string, enabled: bool, error: string }
 
 export global Locale { in-out property <bool> rtl: true; }
 
@@ -80,6 +81,30 @@ component Toggle inherits Rectangle {
     Text { horizontal-alignment: Locale.rtl ? right : left; x: Locale.rtl ? 0px : 59px; width: max(0px, parent.width - 59px); height: parent.height; text: root.text; color: root.enabled ? Colors.text : Colors.muted; font-size: 12px; vertical-alignment: center; overflow: elide; }
     focus := FocusScope { enabled: root.enabled; key-pressed(e) => { if e.text == " " || e.text == Key.Return { root.flip(); return accept; } return reject; } }
     touch := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { focus.focus(); root.flip(); } }
+}
+
+component HotkeySettingRow inherits Rectangle {
+    in property <int> index;
+    in property <string> name;
+    in property <string> chord;
+    in-out property <bool> enabled;
+    in property <string> error;
+    in property <bool> capturing: false;
+    callback record(int);
+    callback toggle(int, bool);
+    callback clear(int);
+    min-height: 62px; preferred-height: 62px; vertical-stretch: 0;
+    border-radius: 13px; background: #0b1730; border-width: 1px; border-color: root.capturing ? Colors.accent : Colors.border;
+    FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; spacing: 10px; padding: 9px;
+        VerticalLayout { layout-order: Locale.rtl ? 0 : 0; horizontal-stretch: 1; spacing: 3px;
+            Text { horizontal-alignment: Locale.rtl ? right : left; text: root.name; color: Colors.text; font-size: 12px; font-weight: 650; vertical-alignment: center; }
+            Text { horizontal-alignment: Locale.rtl ? right : left; text: root.error; color: root.error != "" ? #ffad9b : Colors.muted; font-size: 10px; overflow: elide; }
+        }
+        Text { layout-order: Locale.rtl ? -1 : 1; text: root.capturing ? (Locale.rtl ? "ترکیب را بزن…" : "Press shortcut…") : root.chord; width: 135px; color: root.capturing ? #a6e8ff : Colors.muted; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
+        Toggle { layout-order: Locale.rtl ? -2 : 2; compact: true; width: 104px; text: root.enabled ? (Locale.rtl ? "فعال" : "On") : (Locale.rtl ? "خاموش" : "Off"); checked <=> root.enabled; toggled => { root.toggle(root.index, root.enabled); } }
+        Action { layout-order: Locale.rtl ? -3 : 3; width: 90px; text: root.capturing ? (Locale.rtl ? "لغو ضبط" : "Cancel") : (Locale.rtl ? "تغییر" : "Record"); selected: root.capturing; clicked => { root.record(root.index); } }
+        Action { layout-order: Locale.rtl ? -4 : 4; width: 78px; text: Locale.rtl ? "خاموش" : "Clear"; enabled: root.enabled; clicked => { root.clear(root.index); } }
+    }
 }
 
 component HelpButton inherits Rectangle {
@@ -390,6 +415,7 @@ export component AppWindow inherits Window {
     in-out property <bool> english: false;
     in-out property <int> page: 0;
     in-out property <int> target: 100;
+    in-out property <int> default-volume: 50;
     in-out property <int> boost: 24;
     in-out property <int> reaction: 1;
     in-out property <int> intensity: 1;
@@ -407,7 +433,7 @@ export component AppWindow inherits Window {
     in-out property <bool> startup-active: false;
     in property <string> startup-message;
     in property <string> app-version;
-    property <string> version-label: "v1.0.1";
+    property <string> version-label: "v1.0.2";
     out property <string> sidebar-brand-text: root.english ? "MAXI\nSOUNDSET" : "مکسی سَوندسِت";
     out property <string> log-label: root.english ? "Log" : "لاگ";
     out property <string> gain-label: root.english ? "GAIN" : "بهره صدا";
@@ -417,6 +443,8 @@ export component AppWindow inherits Window {
     in-out property <int> app-update-state: 0; // 0 idle, 1 checking, 2 current, 3 available, 4 error
     in-out property <string> app-latest-version: "";
     in property <[ConflictRow]> conflicts;
+    in property <[HotkeyRow]> hotkey-rows;
+    in-out property <int> hotkey-capture-index: -1;
     in property <string> conflict-message;
     property <int> pending-conflict: -1;
     property <string> pending-name;
@@ -492,6 +520,10 @@ export component AppWindow inherits Window {
     callback toggle-audio();
     callback toggle-pause();
     callback config-changed();
+    callback begin-hotkey-capture(int);
+    callback set-hotkey-enabled(int, bool);
+    callback clear-hotkey(int);
+    callback reset-hotkeys();
     callback eq-band-changed(int, float);
     callback reset-equalizer();
     callback refresh-devices();
@@ -512,6 +544,7 @@ export component AppWindow inherits Window {
     public function close-profile-menu() { profile-menu.close-menu(); }
     public function preview-routing-help() { routing-help.open-help(); }
     public function close-routing-help() { routing-help.close-help(); }
+    public function scroll-settings-to(offset: float) { settings-scroll.content-y = 0px - offset * 1px; }
 
 
     FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; spacing: 0px;
@@ -612,9 +645,9 @@ export component AppWindow inherits Window {
                             }
                             Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "PRESETS" : "حالت‌های آماده"; color: Colors.muted; font-size: 10px; }
                             FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; spacing: 7px;
-                                Action { layout-order: Locale.rtl ? 0 : 0; text: root.english ? "Quiet" : "آرام"; selected: root.target == 65; clicked => { root.target = 65; root.config-changed(); } }
-                                Action { layout-order: Locale.rtl ? -1 : 1; text: root.english ? "Daily" : "روزمره"; selected: root.target == 100; clicked => { root.target = 100; root.config-changed(); } }
-                                Action { layout-order: Locale.rtl ? -2 : 2; text: root.english ? "Loud" : "بلند"; selected: root.target == 140; clicked => { root.target = 140; root.config-changed(); } }
+                                Action { layout-order: Locale.rtl ? 0 : 0; text: root.english ? "Quiet" : "آرام"; selected: root.target == (root.mode == 0 ? 20 : 65); clicked => { root.target = root.mode == 0 ? 20 : 65; root.config-changed(); } }
+                                Action { layout-order: Locale.rtl ? -1 : 1; text: root.english ? "Daily" : "روزمره"; selected: root.target == (root.mode == 0 ? 50 : 100); clicked => { root.target = root.mode == 0 ? 50 : 100; root.config-changed(); } }
+                                Action { layout-order: Locale.rtl ? -2 : 2; text: root.english ? "Loud" : "بلند"; selected: root.target == (root.mode == 0 ? 100 : 140); clicked => { root.target = root.mode == 0 ? 100 : 140; root.config-changed(); } }
                             }
                         }
                     }
@@ -788,17 +821,26 @@ export component AppWindow inherits Window {
 
 
         PageSurface { width: parent.width; height: parent.height; active: root.page == 4;
-            ScrollView { VerticalLayout { padding: 28px; spacing: 20px; alignment: start;
+            settings-scroll := ScrollView { VerticalLayout { padding: 28px; spacing: 16px; alignment: start;
                 Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Settings" : "تنظیمات"; color: Colors.text; font-size: 28px; font-weight: 800; }
-                Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Choose Windows startup and interface language." : "اجرای خودکار با ورود به ویندوز و زبان رابط را تنظیم کن."; color: Colors.muted; wrap: word-wrap; }
-                Rectangle { min-height: 260px; border-radius: 24px; background: Colors.panel; border-width: 1px; border-color: Colors.border;
-                    VerticalLayout { padding: 22px; spacing: 13px; alignment: start;
-                        Toggle { text: root.english ? "Run the application at startup" : "اجرای نرم افزار به صورت استارت‌آپ"; enabled: !root.busy; checked <=> root.startup; toggled => { root.startup-changed(); } }
-                        Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Starts in the background. Open Maxi from its tray icon or run the app again. Audio starts when you press Run." : "برنامه در پس‌زمینه اجرا می‌شود؛ از آیکون کنار ساعت یا اجرای دوبارهٔ برنامه بازش کن. پردازش صدا با دکمهٔ اجرا فعال می‌شود."; color: Colors.muted; font-size: 12px; wrap: word-wrap; }
+                Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Set your default volume, startup behavior, keyboard shortcuts, and interface language." : "ولوم پیش‌فرض، رفتار استارت‌آپ، کلیدهای میانبر و زبان رابط را تنظیم کن."; color: Colors.muted; wrap: word-wrap; }
+                Rectangle { border-radius: 20px; background: Colors.panel; border-width: 1px; border-color: Colors.border;
+                    VerticalLayout { padding: 18px; spacing: 9px; alignment: start;
+                        FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; spacing: 16px;
+                            Text { layout-order: Locale.rtl ? 0 : 0; horizontal-stretch: 1; horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Default volume when app starts" : "ولوم پیش‌فرض هنگام شروع برنامه"; color: Colors.text; font-weight: 700; vertical-alignment: center; }
+                            SpinBox { layout-order: Locale.rtl ? -1 : 1; width: 154px; minimum: 0; maximum: 100; value <=> root.default-volume; edited => { root.config-changed(); } }
+                        }
+                        Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Used when the program opens and when audio resumes at Windows startup. Changing the current target does not change this default." : "هنگام بازشدن برنامه و ازسرگیری صدا هنگام شروع ویندوز استفاده می‌شود. تغییر سطح فعلی، مقدار پیش‌فرض را عوض نمی‌کند."; color: Colors.muted; font-size: 11px; wrap: word-wrap; }
+                    }
+                }
+                Rectangle { border-radius: 20px; background: Colors.panel; border-width: 1px; border-color: Colors.border;
+                    VerticalLayout { padding: 18px; spacing: 8px; alignment: start;
+                        Toggle { text: root.english ? "Run the application at startup" : "اجرای برنامه هنگام ورود به ویندوز"; enabled: !root.busy; checked <=> root.startup; toggled => { root.startup-changed(); } }
+                        Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Maxi starts in the background. Open it from the tray icon or launch it again; audio starts when you press Run." : "مکسی در پس‌زمینه اجرا می‌شود. از آیکون کنار ساعت یا با اجرای دوباره آن را باز کن؛ صدا با زدن دکمهٔ اجرا شروع می‌شود."; color: Colors.muted; font-size: 11px; wrap: word-wrap; }
                         Rectangle { height: 1px; background: Colors.border; }
-                        Toggle { text: root.english ? "Keep audio active after startup" : "اکتیو بودن نرم‌افزار به صورت استارت‌آپ"; enabled: root.startup && !root.busy; checked <=> root.startup-active; toggled => { root.config-changed(); } }
-                        Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "If Windows shuts down while audio is running, the app automatically resumes the last output and settings at the next startup." : "اگر هنگام خاموش شدن ویندوز پردازش صدا در حال اجرا باشد، برنامه در استارت‌آپ بعدی همان خروجی و آخرین تنظیمات را خودکار دوباره اجرا می‌کند."; color: Colors.muted; font-size: 12px; wrap: word-wrap; }
-                        Text { horizontal-alignment: Locale.rtl ? right : left; text: root.startup-message; color: #8fdfdf; font-size: 11px; wrap: word-wrap; }
+                        Toggle { text: root.english ? "Resume audio after Windows startup" : "ازسرگیری صدا پس از شروع ویندوز"; enabled: root.startup && !root.busy; checked <=> root.startup-active; toggled => { root.config-changed(); } }
+                        Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "When Maxi was running at shutdown, the last output and settings resume automatically at the next startup." : "اگر مکسی هنگام خاموش‌شدن ویندوز در حال اجرا باشد، خروجی و تنظیمات آخر در شروع بعدی خودکار از سر گرفته می‌شوند."; color: Colors.muted; font-size: 11px; wrap: word-wrap; }
+                        if root.startup-message != "": Text { horizontal-alignment: Locale.rtl ? right : left; text: root.startup-message; color: #8fdfdf; font-size: 11px; wrap: word-wrap; }
                     }
                 }
                 Rectangle { min-height: 122px; border-radius: 24px; background: Colors.panel; border-width: 1px; border-color: Colors.border;
@@ -808,6 +850,25 @@ export component AppWindow inherits Window {
                             Action { layout-order: Locale.rtl ? -1 : 1; text: root.english ? "فارسی / FA" : "English / EN"; width: 145px; clicked => { root.english = !root.english; root.config-changed(); } }
                         }
                         Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Persian mirrors the sidebar, menus, cards and text alignment." : "در فارسی، نوار کناری، منوها، کارت‌ها و نوشته‌ها راست‌چین می‌شوند."; color: Colors.muted; font-size: 12px; wrap: word-wrap; }
+                    }
+                }
+                Rectangle { border-radius: 20px; background: Colors.panel; border-width: 1px; border-color: Colors.border;
+                    VerticalLayout { padding: 18px; spacing: 9px; alignment: start;
+                        FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; spacing: 12px;
+                            VerticalLayout { layout-order: Locale.rtl ? 0 : 0; horizontal-stretch: 1; spacing: 4px;
+                                Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Keyboard shortcuts" : "کلیدهای میانبر"; color: Colors.text; font-size: 18px; font-weight: 750; }
+                                Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Select Record, then press your combination. Esc cancels. Shortcuts also work while Maxi is hidden; media keys control Maxi volume." : "برای تغییر میانبر، «تغییر» را بزن و کلیدها را فشار بده؛ Esc لغو می‌کند. میانبرها در پس‌زمینه هم فعال‌اند و کلیدهای مدیا ولوم مکسی را کنترل می‌کنند."; color: Colors.muted; font-size: 11px; wrap: word-wrap; }
+                            }
+                            Action { layout-order: Locale.rtl ? -1 : 1; width: 150px; text: root.english ? "Restore defaults" : "بازگردانی پیش‌فرض‌ها"; clicked => { root.reset-hotkeys(); } }
+                        }
+                        Text { horizontal-alignment: Locale.rtl ? right : left; text: root.hotkey-capture-index >= 0 ? (root.english ? "Press a combination; Escape cancels." : "ترکیب را فشار بده؛ Escape لغو می‌کند.") : ""; color: #a6e8ff; font-size: 11px; }
+                        for row[i] in root.hotkey-rows: HotkeySettingRow {
+                            index: i; name: row.name; chord: row.chord; enabled: row.enabled; error: row.error;
+                            capturing: root.hotkey-capture-index == i;
+                            record(index) => { if root.hotkey-capture-index == index { root.hotkey-capture-index = -1; root.begin-hotkey-capture(-1); } else { root.hotkey-capture-index = index; root.begin-hotkey-capture(index); } }
+                            toggle(index, value) => { root.set-hotkey-enabled(index, value); }
+                            clear(index) => { root.clear-hotkey(index); }
+                        }
                     }
                 }
             } }
@@ -848,7 +909,7 @@ export component AppWindow inherits Window {
                 Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "About MAXI SOUNDSET" : "درباره MAXI SOUNDSET"; color: Colors.text; font-size: 28px; font-weight: 800; }
                 about-overview := Rectangle { height: 278px; vertical-stretch: 0; border-radius: 24px; background: Colors.panel; border-width: 1px; border-color: Colors.border;
                     VerticalLayout { padding: 16px; spacing: 5px; alignment: start;
-                        Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "MAXI SOUNDSET  ·  " + root.version-label : "مکسی سَوندسِت. نسخه ۱.۰.۱"; color: #90dfeb; font-size: 20px; font-weight: 700; }
+                        Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "MAXI SOUNDSET  ·  " + root.version-label : "مکسی سَوندسِت. نسخه ۱.۰.۲"; color: #90dfeb; font-size: 20px; font-weight: 700; }
                         Rectangle { height: 36px; vertical-stretch: 0; background: transparent;
                             update-action := Action {
                                 x: Locale.rtl ? parent.width - self.width : 0px;
@@ -934,6 +995,7 @@ export component MaxiTray inherits SystemTrayIcon {
     in property <string> tray-tip: "MAXI SOUNDSET";
     in property <bool> active: false;
     in property <bool> paused: false;
+    in property <int> mode: 0;
     callback show-window();
     callback toggle-pause();
     callback set-target(int);
@@ -943,9 +1005,9 @@ export component MaxiTray inherits SystemTrayIcon {
         MenuItem { title: "Show MAXI SOUNDSET"; activated => { root.show-window(); } }
         MenuItem { title: root.paused ? "Resume" : "Pause"; enabled: root.active; activated => { root.toggle-pause(); } }
         Menu { title: "Sound target";
-            MenuItem { title: "Quiet · 65"; activated => { root.set-target(65); } }
-            MenuItem { title: "Daily · 100"; activated => { root.set-target(100); } }
-            MenuItem { title: "Loud · 140"; activated => { root.set-target(140); } }
+            MenuItem { title: root.mode == 0 ? "Quiet · 20" : "Quiet · 65"; activated => { root.set-target(root.mode == 0 ? 20 : 65); } }
+            MenuItem { title: root.mode == 0 ? "Daily · 50" : "Daily · 100"; activated => { root.set-target(root.mode == 0 ? 50 : 100); } }
+            MenuItem { title: root.mode == 0 ? "Loud · 100" : "Loud · 140"; activated => { root.set-target(root.mode == 0 ? 100 : 140); } }
         }
         MenuSeparator { }
         MenuItem { title: "Exit app"; activated => { root.exit-app(); } }

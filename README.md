@@ -4,7 +4,7 @@
 
 **Adaptive Audio Processing & Loudness Control for Windows**
 
-[![Release](https://img.shields.io/badge/Release-v1.0.1-2ea44f?style=for-the-badge&logo=github)](../../releases)
+[![Release](https://img.shields.io/badge/Release-v1.0.2-2ea44f?style=for-the-badge&logo=github)](../../releases)
 [![Rust](https://img.shields.io/badge/Rust-black?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Slint](https://img.shields.io/badge/Slint-UI-27ae60?style=for-the-badge)](https://slint.dev/)
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://microsoft.com/windows)
@@ -23,13 +23,13 @@
 
 <div align="center">
 
-[![Download MAXI SOUNDSET](https://img.shields.io/badge/Download-MAXI--SOUNDSET--v1.0.1--Setup.exe-success?style=for-the-badge&logo=windows&logoColor=white)](../../releases)
+[![Download MAXI SOUNDSET](https://img.shields.io/badge/Download-MAXI--SOUNDSET--v1.0.2--Setup.exe-success?style=for-the-badge&logo=windows&logoColor=white)](../../releases)
 
 *Compatible with Windows 10 & 11 (64-bit)*
 
 </div>
 
-1. Download **`MAXI-SOUNDSET-v1.0.1-Setup.exe`** from the [Releases](../../releases) page.
+1. Download **`MAXI-SOUNDSET-v1.0.2-Setup.exe`** from the [Releases](../../releases) page.
 2. Run the installer and complete the setup.
 3. The application can also be launched directly from its installed folder.
 
