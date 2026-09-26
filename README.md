@@ -1,6 +1,9 @@
 <div align="center">
 
-# 🎛️ MAXI SOUNDSET
+<h1>
+  <img src="Logo.png" width="100" height="100" align="absmiddle" alt="Maxi Soundset logo" /> 
+  MAXI SOUNDSET
+</h1>
 
 **Adaptive Audio Processing & Loudness Control for Windows**
 
