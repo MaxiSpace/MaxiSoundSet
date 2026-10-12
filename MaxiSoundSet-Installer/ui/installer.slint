@@ -1,7 +1,8 @@
 import "../../MaxiSoundSet-Rust/assets/Vazir.ttf";
 import "../../MaxiSoundSet-Rust/assets/Vazir-Bold.ttf";
-import { ListView, CheckBox, LineEdit, ProgressIndicator } from "std-widgets.slint";
+import { ScrollView, ListView, CheckBox, ComboBox, LineEdit, ProgressIndicator } from "std-widgets.slint";
 export struct Term { heading: string, body: string }
+export struct PlaybackOutput { id: string, name: string }
 component Button inherits Rectangle {
  in property<string> text;
  in property<bool> enabled: true;
@@ -28,6 +29,19 @@ component Button inherits Rectangle {
  hover := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { focus.focus(); root.clicked(); } }
  if focus.has-focus: Rectangle { background: transparent; border-radius: 17px; border-width: 1px; border-color: #96e6f0; }
 }
+component BilingualCheckBox inherits Rectangle {
+ in property<bool> english: false;
+ in property<string> text;
+ in property<bool> enabled: true;
+ in-out property<bool> checked;
+ background: transparent;
+ min-height: 24px; preferred-height: 24px;
+ min-width: 0px; max-width: 10000px; horizontal-stretch: 1;
+ forward-focus: box;
+ box := CheckBox { x: root.english ? 0px : root.width - self.width; y: (root.height - self.height)/2; width: 24px; height: 24px; min-width: 24px; max-width: 24px; min-height: 24px; max-height: 24px; text: ""; checked <=> root.checked; enabled: root.enabled; accessible-label: root.text; }
+ Text { x: root.english ? 30px : 0px; width: max(0px, root.width - 30px); height: root.height; text: root.text; color: root.enabled ? #d4deec : #77899e; wrap: word-wrap; horizontal-alignment: root.english ? left : right; vertical-alignment: center; accessible-role: none; }
+ TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { box.focus(); root.checked = !root.checked; } }
+}
 export component InstallerWindow inherits Window {
  title: root.english ? (root.uninstall ? "MAXI SOUNDSET Uninstaller" : "MAXI SOUNDSET Installer") : (root.uninstall ? "حذف MAXI SOUNDSET" : "نصب MAXI SOUNDSET");
  icon: @image-url("../../MaxiSoundSet-Rust/assets/icon.png");
@@ -42,6 +56,21 @@ export component InstallerWindow inherits Window {
  in-out property<bool> desktop-shortcut: true;
  in-out property<bool> startup: true;
  in-out property<bool> delete-data: false;
+ in-out property<bool> remove-cable: false;
+ in property<[PlaybackOutput]> playback-outputs;
+ in property<[string]> playback-output-names;
+ in-out property<int> selected-output-index: -1;
+ in-out property<string> selected-output-id;
+ // 0 checking, 1 present, 2 absent, 3 unknown
+ in property<int> cable-presence: 0;
+ in property<int> cable-provenance: 0;
+ in property<int> cable-outcome: 0;
+ in property<string> cable-result;
+ in property<bool> cable-restart-recommended: false;
+ in property<int> fallback-state: 0;
+ in property<string> fallback-name;
+ in property<int> default-route-state: 0;
+ in property<int> recovery-state: 0;
  in-out property<bool> launch-app: true;
  in property<bool> busy: false;
  in property<bool> app-running: false;
@@ -71,15 +100,15 @@ export component InstallerWindow inherits Window {
     Image { source: @image-url("../../MaxiSoundSet-Rust/assets/sidebar-logo.svg"); width: 42px; height: 42px; x: 4px; y: 4px; image-fit: contain; }
    }
    VerticalLayout { spacing: 1px;
-    Text { text: "MAXI SOUNDSET"; color: #f3fcff; font-weight: 800; font-size: 24px; }
-    Text { text: root.english ? (root.uninstall ? "Uninstaller" : "Installer") : (root.uninstall ? "حذف برنامه" : "نصب برنامه"); color: #a5bdd2; }
+    Text { text: "MAXI SOUNDSET"; color: #f3fcff; font-weight: 800; font-size: 24px; horizontal-alignment: root.english ? left : right; }
+    Text { text: root.english ? (root.uninstall ? "Uninstaller" : "Installer") : (root.uninstall ? "حذف برنامه" : "نصب برنامه"); color: #a5bdd2; horizontal-alignment: root.english ? left : right; }
    }
    Button { text: root.english ? "فارسی / FA" : "English / EN"; width: 130px; enabled: !root.busy; clicked => { root.english = !root.english; root.language-changed(); } }
   }
   FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; spacing: 22px;
    Rectangle { layout-order: root.english ? 0 : 1; width: 188px; background: transparent;
     VerticalLayout { padding-top: 26px; spacing: 12px; alignment: start;
-     for name[i] in [root.english ? "Welcome" : "خوش آمدید", root.english ? (root.uninstall ? "Review" : "Agreement") : (root.uninstall ? "بررسی حذف" : "توافق نامه"), root.english ? "Choose location" : "انتخاب مسیر", root.english ? (root.uninstall ? "Removing" : "Installing") : (root.uninstall ? "حذف" : "نصب"), root.english ? "Finish" : "پایان"]: Rectangle {
+     for name[i] in [root.english ? "Welcome" : "خوش‌آمدید", root.english ? (root.uninstall ? "Review" : "Agreement") : (root.uninstall ? "بررسی حذف" : "توافق‌نامه"), root.english ? "Choose location" : "انتخاب مسیر", root.english ? (root.uninstall ? "Removing" : "Installing") : (root.uninstall ? "حذف" : "نصب"), root.english ? "Finish" : "پایان"]: Rectangle {
       visible: !root.uninstall || i != 2; height: root.uninstall && i == 2 ? 0px : 64px; border-radius: 24px;
       background: root.step == i ? #213a51 : transparent;
       border-width: 1px; border-color: root.step == i ? #478cac : transparent;
@@ -105,14 +134,14 @@ export component InstallerWindow inherits Window {
       HorizontalLayout { height: 170px; Rectangle { horizontal-stretch: 1; background: transparent; } Rectangle { height: 170px; width: 170px; border-radius: 85px; border-width: 2px; border-color: #69afc9; background: #00193f;
        Image { source: @image-url("../../MaxiSoundSet-Rust/assets/sidebar-logo.svg"); width: 145px; height: 145px; x: 12.5px; y: 12.5px; image-fit: contain; }
       } Rectangle { horizontal-stretch: 1; background: transparent; } }
-      Text { text: root.english ? (root.uninstall ? "Remove MAXI SOUNDSET" : "Welcome to MAXI SOUNDSET") : (root.uninstall ? "حذف MAXI SOUNDSET" : "به نصب MAXI SOUNDSET خوش آمدید"); wrap: word-wrap; color: #f3fcff; font-size: 23px; font-weight: 700; horizontal-alignment: center; }
+      Text { text: root.english ? (root.uninstall ? "Remove MAXI SOUNDSET" : "Welcome to MAXI SOUNDSET") : (root.uninstall ? "حذف MAXI SOUNDSET" : "به نصب MAXI SOUNDSET خوش‌آمدید"); wrap: word-wrap; color: #f3fcff; font-size: 23px; font-weight: 700; horizontal-alignment: center; }
       Text { text: root.version-label; color: #a9c4d8; font-size: 18px; horizontal-alignment: center; }
       Text { text: "MaxiSpace.dev  ·  2026"; color: #a5e5ed; font-size: 15px; horizontal-alignment: center; }
       Text { text: root.english ? "All rights to this application belong to MaxiSpace.dev." : "تمامی حقوق این نرم‌افزار متعلق به برند MaxiSpace.dev است."; color: #a5b7ce; font-size: 12px; wrap: word-wrap; horizontal-alignment: center; }
-      Text { text: root.english ? (root.uninstall ? "Review the files and preferences before removing the application." : "Better sound for you.\nAll application files are included in this installer.") : (root.uninstall ? "پیش از حذف، مسیر نصب و تنظیمات را بررسی کن." : "صدای بهتر برای تو\nتمام فایل های برنامه در همین نصاب قرار دارند."); color: #a5b7ce; wrap: word-wrap; horizontal-alignment: center; }
+      Text { text: root.english ? (root.uninstall ? "Review the files and preferences before removing the application." : "Better sound for you.\nAll application files are included in this installer.") : (root.uninstall ? "پیش از حذف، مسیر نصب و تنظیمات را بررسی کن." : "صدای بهتر برای تو\nتمام فایل‌های برنامه در همین نصاب قرار دارند."); color: #a5b7ce; wrap: word-wrap; horizontal-alignment: center; }
      }
      if root.step == 1 && !root.uninstall: VerticalLayout { spacing: 12px;
-      Text { text: root.english ? "Terms and agreement" : "شرایط و توافق نامه"; color: #f3fcff; font-size: 23px; font-weight: 700; horizontal-alignment: root.english ? left : right; }
+      Text { text: root.english ? "Terms and agreement" : "شرایط و توافق‌نامه"; color: #f3fcff; font-size: 23px; font-weight: 700; horizontal-alignment: root.english ? left : right; }
       Text { text: root.english ? "Full agreement · Scroll to read all 6 sections" : "متن کامل توافق‌نامه · برای مطالعهٔ هر ۶ بخش، به پایین اسکرول کنید"; color: #91a9c1; font-size: 11px; horizontal-alignment: root.english ? left : right; }
       agreement-list := ListView { vertical-stretch: 1; content-y <=> root.agreement-scroll-y;
        changed content-height => { root.agreement-content-height = self.content-height; }
@@ -122,26 +151,56 @@ export component InstallerWindow inherits Window {
         if item.body != "": Text { width: parent.width; text: item.body; color: #d4deec; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
        }
       }
-      CheckBox { text: root.english ? "I have read and accept this agreement" : "توافق نامه را خوانده ام و می پذیرم"; checked <=> root.accepted; }
+      BilingualCheckBox { english: root.english; text: root.english ? "I have read and accept this agreement" : "توافق‌نامه را خوانده‌ام و می‌پذیرم"; checked <=> root.accepted; }
      }
-     if root.step == 2 || (root.step == 1 && root.uninstall): VerticalLayout { spacing: 18px; alignment: start;
+     if root.step == 2 && !root.uninstall: VerticalLayout { spacing: 18px; alignment: start;
       Text { text: root.english ? (root.uninstall ? "Ready to remove" : "Choose installation location") : (root.uninstall ? "آماده حذف برنامه" : "انتخاب مسیر نصب"); color: #f3fcff; font-size: 22px; font-weight: 700; horizontal-alignment: root.english ? left : right; }
       Text { text: root.english ? "Location" : "مسیر"; color: #a6bed1; horizontal-alignment: root.english ? left : right; }
       LineEdit { text <=> root.install-path; enabled: !root.uninstall; }
       if !root.uninstall: Button { text: root.english ? "Browse…" : "انتخاب پوشه…"; clicked => { root.browse(); } }
-      if !root.uninstall: CheckBox { text: root.english ? "Create desktop shortcut" : "ساخت میان بر روی دسکتاپ"; checked <=> root.desktop-shortcut; }
-      if !root.uninstall: CheckBox { text: root.english ? "Start with Windows" : "اجرا هنگام روشن شدن ویندوز"; checked <=> root.startup; }
-      if root.uninstall: CheckBox { text: root.english ? "Also delete settings and logs" : "تنظیمات و لاگ ها هم حذف شوند"; checked <=> root.delete-data; }
+      if !root.uninstall: BilingualCheckBox { english: root.english; text: root.english ? "Create desktop shortcut" : "ساخت میان‌بر روی دسکتاپ"; checked <=> root.desktop-shortcut; }
+      if !root.uninstall: BilingualCheckBox { english: root.english; text: root.english ? "Start with Windows" : "اجرا هنگام روشن شدن ویندوز"; checked <=> root.startup; }
+      if root.uninstall: BilingualCheckBox { english: root.english; text: root.english ? "Also delete settings and logs" : "تنظیمات و لاگ‌ها هم حذف شوند"; checked <=> root.delete-data; }
       if root.uninstall && root.app-running: Rectangle { min-height: 114px; border-radius: 18px; background: #22243a; border-width: 1px; border-color: #ffb07480;
        VerticalLayout { padding: 15px; spacing: 10px;
         Text { text: root.closing-app ? (root.english ? "Waiting for safe shutdown and audio restoration…" : "در انتظار خروج امن و بازگردانی وضعیت صدا…") : (root.english ? "MAXI SOUNDSET is running. Close it before removing the application or its data." : "نرم‌افزار MAXI SOUNDSET باز است. پیش از حذف برنامه یا داده‌های آن، نرم‌افزار را ببند."); color: #ffbe8d; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
         Button { text: root.english ? "Close software" : "بستن نرم‌افزار"; enabled: !root.busy; clicked => { root.close-app(); } }
        }
       }
-      Text { text: root.english ? (root.uninstall ? "Only installed application files and owned shortcuts are removed. Close the app with Exit app before continuing." : "Installation is for your current Windows account. The Start menu shortcut and Uninstall.exe are included. Audio drivers are installed separately from Components inside the app.") : (root.uninstall ? "فقط فایل های نصب شده و میان برهای همین نصب حذف می شوند. پیش از ادامه، برنامه را با خروج از برنامه ببند." : "نصب برای حساب فعلی ویندوز است. میان بر منوی شروع و Uninstall.exe نیز ساخته می شوند. درایور صوتی از تب افزونه های خود برنامه نصب می شود."); color: #a5b7ce; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
+      Text { text: root.english ? (root.uninstall ? "Only installed application files and owned shortcuts are removed. Close the app with Exit app before continuing." : "Installation is for your current Windows account. The Start menu shortcut and Uninstall.exe are included. Audio drivers are installed separately from Components inside the app.") : (root.uninstall ? "فقط فایل‌های نصب‌شده و میان‌برهای همین نصب حذف می‌شوند. پیش از ادامه، برنامه را با خروج از برنامه ببند." : "نصب برای حساب فعلی ویندوز است. میان‌بر منوی شروع و Uninstall.exe نیز ساخته می‌شوند. درایور صوتی از تب افزونه‌های خود برنامه نصب می‌شود."); color: #a5b7ce; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
+     }
+     if root.step == 1 && root.uninstall: ScrollView {
+      vertical-stretch: 1;
+      review-content := VerticalLayout { width: parent.visible-width - 14px; spacing: 14px; padding-right: 6px; alignment: start;
+       Text { text: root.english ? "Ready to remove" : "آماده حذف برنامه"; color: #f3fcff; font-size: 22px; font-weight: 700; horizontal-alignment: root.english ? left : right; }
+       Text { text: root.english ? "Location" : "مسیر"; color: #a6bed1; horizontal-alignment: root.english ? left : right; }
+       LineEdit { text <=> root.install-path; enabled: false; }
+       BilingualCheckBox { english: root.english; text: root.english ? "Also delete settings and logs" : "تنظیمات و لاگ‌ها هم حذف شوند"; checked <=> root.delete-data; }
+       if root.cable-presence == 1 || root.remove-cable: BilingualCheckBox { english: root.english; text: root.english ? "Remove virtual cable (VB-CABLE)" : "حذف کابل مجازی (VB-CABLE)"; checked <=> root.remove-cable; }
+       if root.cable-presence == 1: Text { text: root.english ? "VB-CABLE is present and kept by default. Other apps may use it. If selected, Windows asks for administrator approval; choose Remove Driver in the official setup. The app and data stay intact unless removal is verified." : "کابل VB-CABLE شناسایی شد و پیش‌فرض حفظ می‌شود. ممکن است برنامه‌های دیگر از آن استفاده کنند. با انتخاب این گزینه، اجازهٔ مدیر خواسته می‌شود؛ در نصاب رسمی Remove Driver را بزن. برنامه و داده‌ها تا تأیید حذف حفظ می‌شوند."; color: #a5b7ce; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
+       if root.remove-cable: VerticalLayout { spacing: 8px;
+        Text { text: root.english ? "Playback output after cable removal" : "خروجی پخش پس از حذف کابل"; color: #a6bed1; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
+        ComboBox { model: root.playback-output-names; current-index <=> root.selected-output-index; enabled: !root.busy && root.playback-outputs.length > 0; selected(value) => { root.selected-output-id = root.playback-outputs[self.current-index].id; } }
+        Text { text: root.playback-outputs.length == 0 ? (root.english ? "No verified active physical output is available. Connect or enable a physical playback device, then retry." : "خروجی فیزیکی فعال و تأییدشده‌ای در دسترس نیست. دستگاه پخش فیزیکی را وصل یا فعال کن و دوباره تلاش کن.") : (root.english ? "When you click Uninstall with cable removal selected, Windows audio moves to this device before official setup opens. Volume and mute are preserved." : "با زدن «حذف برنامه»، صدای ویندوز ابتدا به این دستگاه منتقل می‌شود و سپس نصاب رسمی باز می‌شود. بلندی صدا و وضعیت بی‌صدا بودن حفظ می‌شوند."); color: #a5b7ce; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
+       }
+       if root.cable-presence != 1: Text { text: root.cable-presence == 0 ? (root.english ? "Checking VB-CABLE presence…" : "در حال بررسی وجود VB-CABLE…") : root.cable-presence == 2 ? (root.english ? "VB-CABLE was not detected in Windows render endpoints." : "کابل VB-CABLE در خروجی‌های صوتی ویندوز شناسایی نشد.") : (root.english ? "VB-CABLE presence could not be determined. The cable will be kept; you can still remove MAXI SOUNDSET." : "وجود VB-CABLE مشخص نشد. کابل حفظ می‌شود؛ همچنان می‌توانی MAXI SOUNDSET را حذف کنی."); color: #a5b7ce; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
+       Text { text: root.cable-provenance == 0 ? (root.english ? "Checking installation history…" : "در حال بررسی سابقهٔ نصب…") : root.cable-provenance == 1 ? (root.english ? "Install history: already existed before this app's install attempt." : "سابقهٔ نصب: پیش از تلاش نصب این برنامه وجود داشته است.") : root.cable-provenance == 2 ? (root.english ? "Install via this app was observed. Other apps may also use the cable." : "نصب از طریق این برنامه مشاهده شده است. ممکن است برنامه‌های دیگر هم از کابل استفاده کنند.") : (root.english ? "Installation history is unknown." : "سابقهٔ نصب مشخص نیست."); color: #a5b7ce; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
+       Text { text: root.fallback-state == 0 ? (root.english ? "Checking alternative output…" : "در حال بررسی خروجی جایگزین…") : root.fallback-state == 1 ? (root.english ? "Alternative output: " : "خروجی جایگزین: ") + root.fallback-name : root.fallback-state == 2 ? (root.english ? "No suitable alternative output." : "خروجی جایگزین مناسبی یافت نشد.") : root.fallback-state == 4 ? (root.english ? "Saved output is unavailable. Choose an output in the app." : "خروجی ذخیره‌شده در دسترس نیست. در برنامه خروجی را انتخاب کن.") : (root.english ? "Could not verify the alternative output." : "خروجی جایگزین قابل تأیید نبود."); color: #a5b7ce; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
+       Text { text: root.default-route-state == 0 ? (root.english ? "Checking Windows playback outputs…" : "در حال بررسی خروجی‌های پخش ویندوز…") : root.default-route-state == 1 ? (root.english ? "Windows playback outputs are verified." : "خروجی‌های پخش ویندوز تأیید شدند.") : root.default-route-state == 2 ? (root.english ? "Windows currently uses VB-CABLE. Selecting cable removal switches it to your chosen physical output when you click Uninstall." : "ویندوز اکنون از VB-CABLE استفاده می‌کند. با انتخاب حذف کابل و زدن حذف برنامه، خروجی به دستگاه فیزیکی انتخاب‌شده تغییر می‌کند.") : (root.english ? "Windows playback outputs could not be verified." : "خروجی‌های پخش ویندوز قابل تأیید نبودند."); color: #a5b7ce; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
+       Text { text: root.recovery-state == 0 ? (root.english ? "Checking audio recovery…" : "در حال بررسی بازیابی صدا…") : root.recovery-state == 1 ? (root.english ? "No pending audio recovery was found." : "بازیابی صدای معلقی یافت نشد.") : root.recovery-state == 2 ? (root.english ? "Restore audio with Stop / Exit app before removal." : "پیش از حذف، صدا را با توقف / خروج از برنامه بازگردان.") : (root.english ? "Recovery status could not be verified. Open the app to check." : "وضعیت بازیابی قابل تأیید نبود. برای بررسی، برنامه را باز کن."); color: #a5b7ce; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
+       Text { text: root.english ? "Read-only snapshot. Cable removal rechecks audio and Windows outputs before and after official setup." : "این فقط وضعیت فعلی است. پیش و پس از نصاب رسمی، صدا و خروجی‌های ویندوز دوباره بررسی می‌شوند."; color: #91a9c1; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
+       if root.app-running: Rectangle { min-height: 114px; border-radius: 18px; background: #22243a; border-width: 1px; border-color: #ffb07480;
+        VerticalLayout { padding: 15px; spacing: 10px;
+         Text { text: root.closing-app ? (root.english ? "Waiting for safe shutdown and audio restoration…" : "در انتظار خروج امن و بازگردانی وضعیت صدا…") : (root.english ? "MAXI SOUNDSET is running. Close it before removing the application or its data." : "نرم‌افزار MAXI SOUNDSET باز است. پیش از حذف برنامه یا داده‌های آن، نرم‌افزار را ببند."); color: #ffbe8d; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
+         Button { text: root.english ? "Close software" : "بستن نرم‌افزار"; enabled: !root.busy; clicked => { root.close-app(); } }
+        }
+       }
+       Text { text: root.english ? "Only installed application files and owned shortcuts are removed. Close the app with Exit app before continuing." : "فقط فایل‌های نصب‌شده و میان‌برهای همین نصب حذف می‌شوند. پیش از ادامه، برنامه را با خروج از برنامه ببند."; color: #a5b7ce; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
+
+      }
      }
      if root.step == 3: VerticalLayout { alignment: center; spacing: 24px;
-      Text { text: root.english ? (root.uninstall ? "Removing application…" : "Installing application…") : (root.uninstall ? "در حال حذف برنامه…" : "در حال نصب برنامه…"); color: #f3fcff; font-size: 24px; font-weight: 700; horizontal-alignment: center; }
+      Text { text: root.english ? (root.uninstall ? (root.cable-outcome == 15 || root.cable-outcome == 14 || root.cable-outcome == 2 ? "Official VB-CABLE removal" : "Removing application…") : "Installing application…") : (root.uninstall ? (root.cable-outcome == 15 || root.cable-outcome == 14 || root.cable-outcome == 2 ? "حذف رسمی VB-CABLE" : "در حال حذف برنامه…") : "در حال نصب برنامه…"); color: #f3fcff; font-size: 24px; font-weight: 700; horizontal-alignment: center; }
       ProgressIndicator { progress: root.progress; }
       Text { text: root.message; color: #a5cbd8; wrap: word-wrap; horizontal-alignment: center; }
      }
@@ -149,9 +208,11 @@ export component InstallerWindow inherits Window {
       Text { text: "✓"; color: #69d4e8; font-size: 62px; horizontal-alignment: center; }
       Text { text: root.english ? (root.uninstall ? "Application removed" : "Installation complete") : (root.uninstall ? "برنامه حذف شد" : "نصب کامل شد"); color: #f3fcff; font-size: 26px; font-weight: 700; horizontal-alignment: center; }
       Text { text: root.install-path; color: #a5b7ce; wrap: word-wrap; horizontal-alignment: center; }
-      if !root.uninstall: CheckBox { text: root.english ? "Launch MAXI SOUNDSET" : "اجرای MAXI SOUNDSET"; checked <=> root.launch-app; }
-      if root.uninstall: Text { text: root.delete-data ? (root.english ? "Settings and logs were removed." : "تنظیمات و لاگ ها حذف شدند.") : (root.english ? "Your settings and logs have been kept." : "تنظیمات و لاگ های تو حفظ شدند."); color: #a5b7ce; wrap: word-wrap; horizontal-alignment: center; }
+      if !root.uninstall: BilingualCheckBox { english: root.english; text: root.english ? "Launch MAXI SOUNDSET" : "اجرای MAXI SOUNDSET"; checked <=> root.launch-app; }
+      if root.uninstall: Text { text: root.delete-data ? (root.english ? "Settings and logs were removed." : "تنظیمات و لاگ‌ها حذف شدند.") : (root.english ? "Your settings and logs have been kept." : "تنظیمات و لاگ‌های تو حفظ شدند."); color: #a5b7ce; wrap: word-wrap; horizontal-alignment: center; }
      }
+     if root.uninstall && root.cable-result != "": Text { text: root.cable-result; color: #a5cbd8; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
+     if root.uninstall && root.cable-restart-recommended && root.cable-outcome != 4 && root.cable-outcome != 5: Text { text: root.english ? "VB-CABLE setup ran earlier. Restart Windows as recommended by VB-Audio." : "نصاب VB-CABLE قبلاً اجرا شد. طبق توصیهٔ VB-Audio ویندوز را بازراه‌اندازی کن."; color: #ffbe8d; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
      if root.error != "": Text { text: root.error; color: #ffb5ba; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
     }
     }
@@ -161,10 +222,10 @@ export component InstallerWindow inherits Window {
    Rectangle { width: parent.width * (root.step == 3 ? root.progress : (root.step + 1)/5); height: parent.height; background: #69d4e8; animate width { duration: 220ms; easing: ease-out; } }
   }
   HorizontalLayout { spacing: 12px; height: 44px;
-   Text { horizontal-stretch: 1; text: root.version-label; color: #96b0c8; vertical-alignment: center; }
+   Text { horizontal-stretch: 1; text: root.version-label; color: #96b0c8; vertical-alignment: center; horizontal-alignment: root.english ? left : right; }
    Button { text: root.english ? "Cancel" : "لغو"; danger: true; enabled: !root.busy; visible: root.step != 4; clicked => { root.cancel(); } }
    Button { text: root.english ? "Back" : "قبلی"; enabled: !root.busy && root.step > 0 && root.step < 3; visible: root.step != 4; clicked => { root.back(); } }
-   Button { text: root.step == 4 ? (root.english ? "Finish" : "پایان") : root.step == 2 || (root.step == 1 && root.uninstall) ? (root.english ? (root.uninstall ? "Uninstall" : "Install") : (root.uninstall ? "حذف برنامه" : "نصب")) : (root.english ? "Next" : "بعدی"); enabled: !root.busy && !(root.uninstall && root.step == 1 && root.app-running) && (root.uninstall || root.step != 1 || root.accepted); clicked => { root.next(); } }
+   Button { text: root.step == 4 ? (root.english ? "Finish" : "پایان") : root.step == 2 || (root.step == 1 && root.uninstall) ? (root.english ? (root.uninstall ? "Uninstall" : "Install") : (root.uninstall ? "حذف برنامه" : "نصب")) : (root.english ? "Next" : "بعدی"); enabled: !root.busy && !(root.uninstall && root.step == 1 && (root.app-running || (root.remove-cable && root.selected-output-id == ""))) && (root.uninstall || root.step != 1 || root.accepted); clicked => { root.next(); } }
   }
  }
 }

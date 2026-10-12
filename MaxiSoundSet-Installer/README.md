@@ -1,27 +1,35 @@
-# MAXI SOUNDSET — Installer v1.0.2
+# MAXI SOUNDSET Installer 1.0.3
 
-Executable: `../MAXI-SOUNDSET-v1.0.2-Setup.exe`. This is the only file needed to install on 64-bit Windows. The app, Vazir font, and interface resources are embedded in the file; installation does not require a separate download.
-
-The installer and uninstaller are written in Rust and use a Slint 1.18 interface with a navy and turquoise theme, Vazir font, and Persian and English languages. The version is read from the application project; the current app version is 1.0.2.
-
-The interface includes soft stage transitions, hover glows and button click responses, and gradual changes to the stage indicator and progress bar. The turquoise frame, large logo card, and line icons for the stages are inspired by the supplied reference.
+The MAXI SOUNDSET installer and uninstaller are written in Rust with a Slint interface in Persian and English. The installer embeds the app executable and interface resources, so a separate download is not needed during installation.
 
 ## Install
 
-Choose a language, read and accept the agreement, then type the installation path or change it with the folder picker. Desktop shortcut creation and launch at Windows startup are optional. Installation is per current Windows account. The default path is `LocalAppData\Programs\MAXI SOUNDSET`. You need write permission for the selected path.
+Choose a language, review and accept the agreement, then select an installation folder. Desktop shortcut creation and starting the app when you sign in are optional. Installation is for the current Windows account; the default folder is under `LocalAppData\Programs\MAXI SOUNDSET`.
 
-The app is registered in the Windows list of installed apps. A Start menu shortcut and `Uninstall.exe` are created in the installation folder. The startup option stays synchronized with the app's own settings. Components and the virtual-cable driver are installed separately from the app's Components tab.
+The installer registers the app with Windows and creates Start menu and uninstall entries. Installing, repairing, or updating VB-CABLE is handled separately through the official vendor installer from the app's Components page.
 
-## Uninstall and upgrade
+## Uninstall and update
 
-The v1.0.2 uninstaller checks whether this installed version is open and displays a warning and a button to close the app before removal. Closing uses the app's normal exit path and restores audio; removal is not allowed until processing ends. Older versions that do not support the safe-exit message must be exited from within the app. The uninstaller never force-kills the app.
+The uninstaller asks the app to exit safely and waits for the process to close. It does not forcibly terminate the app. Settings and logs are kept by default; a separate option removes app data. Other files in the installation folder are preserved.
 
-Before uninstalling or upgrading, use Exit app so the background process is closed. Run `Uninstall.exe` from the installation folder or uninstall the app from Windows Settings. Settings and logs are preserved by default; the uninstaller also offers an option to remove them. Other files in the installation folder are not deleted. To remove itself, the uninstaller runs a temporary copy.
+During app removal, VB-CABLE removal is optional. When selected, the flow checks the cable identity and an available physical output, then moves Windows audio roles to that output before launching the official VB-Audio installer. If a safe route cannot be established, the operation is guarded. Volume and mute state are protected by the routing and recovery checks.
 
-Installing again to the same path upgrades the app files and retains audio settings. If an upgrade fails while registering the installation, the previous files, settings, shortcuts, and registry values are restored.
+App updates are initiated from the app's About page. The user chooses when to download and install. The installer targets the existing installation and preserves app settings, startup choice, and shortcuts on a successful update; handled failures support rollback.
 
 ## Build from source
 
-This project is next to `../MaxiSoundSet-Rust`. First build the final `../MaxiSoundSet-Rust/MaxiSoundSet.exe`; the installer embeds that file using `include_bytes!`. Vazir resources, logo, and icon are also embedded from the app project during compilation. Then run `cargo build --release` with Rust on Windows. In this workspace's development environment, use `../../work/rust-tools/Build-Installer.ps1 -Action release`.
+Install Rust stable 1.98 or newer and the Visual Studio Build Tools with the Windows SDK. Build the app first because the installer embeds its canonical executable. From the `MaxiSoundSet-Rust` directory:
 
-Installation tests run in separate paths and use temporary private registry keys; they do not install the app on the real account. Local verification reports are excluded from this repository.
+```powershell
+.\Build.ps1 -Mode Release
+```
+
+Then, from this installer project directory, build for 64-bit Windows with the MSVC toolchain:
+
+```powershell
+cargo build --release --locked --target x86_64-pc-windows-msvc
+```
+
+The `.cargo/config.toml` sets static CRT linking and an 8 MiB stack for the MSVC target. Project-relative paths are used; no host-specific install location is a production default.
+
+The installer source is licensed under GPL v3 as stated in `LICENSE.txt`. See the app's `THIRD-PARTY-NOTICES.md` and `licenses` directory for bundled component notices. Slint is used under its Royalty-free 2.0 license.

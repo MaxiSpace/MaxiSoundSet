@@ -1,5 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod operations;
+mod update_entry;
+#[path = "../../MaxiSoundSet-Rust/src/update_handoff.rs"]
+mod update_handoff;
+mod cable;
+mod cable_routing;
+#[path = "../../MaxiSoundSet-Rust/src/cable_evidence.rs"]
+mod cable_evidence;
+#[path = "../../MaxiSoundSet-Rust/src/official_cable.rs"]
+mod official_cable;
 mod platform;
 mod running_app;
 use anyhow::{Context, Result};
@@ -11,6 +20,28 @@ use std::{
     time::Duration,
 };
 slint::include_modules!();
+fn refresh_uninstall_review(ui: &InstallerWindow) {
+    let data = PathBuf::from(ui.get_install_path().as_str()).join("Data");
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let review = cable::review(&data);
+        let _ = weak.upgrade_in_event_loop(move |u| {
+            u.set_cable_presence(review.presence);
+            u.set_cable_provenance(review.provenance);
+            u.set_fallback_state(review.fallback);
+            u.set_fallback_name(review.fallback_name.into());
+            u.set_default_route_state(review.defaults);
+            u.set_recovery_state(review.recovery);
+            let selected = u.get_selected_output_id().to_string();
+            let preferred = if review.outputs.iter().any(|e| e.id == selected) {Some(selected)} else {review.preferred_output};
+            let index = preferred.as_ref().and_then(|id| review.outputs.iter().position(|e| &e.id == id)).map(|n| n as i32).unwrap_or(-1);
+            u.set_playback_output_names(Rc::new(VecModel::from(review.outputs.iter().map(|e| slint::SharedString::from(e.name.as_str())).collect::<Vec<_>>())).into());
+            u.set_playback_outputs(Rc::new(VecModel::from(review.outputs.into_iter().map(|e| PlaybackOutput {id:e.id.into(),name:e.name.into()}).collect::<Vec<_>>())).into());
+            u.set_selected_output_index(index);
+            u.set_selected_output_id(preferred.unwrap_or_default().into());
+        });
+    });
+}
 fn terms(english: bool) -> ModelRc<Term> {
     let text = if english {
         include_str!("../assets/EULA_EN.md")
@@ -114,6 +145,9 @@ fn bootstrap() -> Result<Option<PathBuf>> {
 }
 fn run() -> Result<()> {
     let args = std::env::args().collect::<Vec<_>>();
+    if let Some(request) = update_entry::UpdateRequest::from_args(&args)? {
+        return update_entry::run(request);
+    }
     if args
         .get(1)
         .is_some_and(|s| s == "--self-test" || s == "--native-self-test")
@@ -170,9 +204,14 @@ fn run() -> Result<()> {
         }
     }
     ui.set_install_path(path.display().to_string().into());
+    if ui.get_uninstall() && !smoke { refresh_uninstall_review(&ui); }
     let w = ui.as_weak();
     ui.on_language_changed(move || {
         if let Some(u) = w.upgrade() {
+            u.set_cable_result(cable::outcome_message(u.get_cable_outcome(), u.get_english()).into());
+            if [cable::retry_message(false), cable::retry_message(true)].contains(&u.get_error().as_str()) {
+                u.set_error(cable::retry_message(u.get_english()).into());
+            }
             u.set_terms(terms(u.get_english()));
             u.set_version_label(version_label(u.get_english()).into());
         }
@@ -213,6 +252,7 @@ fn run() -> Result<()> {
                 u.set_busy(false);
                 u.set_closing_app(false);
                 u.set_app_running(running);
+                refresh_uninstall_review(&u);
                 if let Err(e) = result {
                     u.set_error(format!("{}: {e:#}", if u.get_english() { "Safe shutdown did not finish. Use Exit app and retry" } else { "خروج امن کامل نشد. از گزینهٔ خروج از برنامه استفاده کن و دوباره تلاش کن" }).into());
                 }
@@ -254,7 +294,15 @@ fn run() -> Result<()> {
             1 | 2 => {
                 let root = PathBuf::from(u.get_install_path().as_str());
                 let uninstall = u.get_uninstall();
+                let uninstall_options = cable::UninstallOptions {
+                    delete_data: u.get_delete_data(),
+                    remove_cable: u.get_remove_cable(),
+                    english: u.get_english(),
+                };
+                let destination = u.get_selected_output_id().to_string();
                 if uninstall {
+                    u.set_cable_outcome(0);
+                    u.set_cable_result("".into());
                     match running_app::is_running(&root) {
                         Ok(true) => {
                             u.set_app_running(true);
@@ -267,7 +315,6 @@ fn run() -> Result<()> {
                         }
                     }
                 }
-                let delete = u.get_delete_data();
                 let options = operations::Options {
                     accepted: u.get_accepted(),
                     desktop: u.get_desktop_shortcut(),
@@ -285,7 +332,14 @@ fn run() -> Result<()> {
                         let _ = notifier.upgrade_in_event_loop(move |u| u.set_progress(progress));
                     };
                     let result = if uninstall {
-                        operations::uninstall(&root, delete, callback).map(|_| root)
+                        let reporter = weak.clone();
+                        operations::uninstall_with_output_report(&root, uninstall_options, &destination, callback, move |outcome| {
+                            let _ = reporter.upgrade_in_event_loop(move |u| {
+                                u.set_cable_outcome(outcome as i32);
+                                u.set_cable_result(outcome.message(u.get_english()).into());
+                                u.set_cable_restart_recommended(cable::restart_recommended(u.get_cable_restart_recommended(), outcome));
+                            });
+                        }).map(|_| root)
                     } else {
                         std::env::current_exe()
                             .context("Missing installer executable")
@@ -312,6 +366,7 @@ fn run() -> Result<()> {
                                     )
                                     .into(),
                                 );
+                                if uninstall { refresh_uninstall_review(&u); }
                             }
                         }
                     });
@@ -374,7 +429,7 @@ fn run() -> Result<()> {
                 }
             },
         );
-        timer.start(slint::TimerMode::Repeated,Duration::from_millis(700),move||{let Some(u)=w.upgrade()else{return};let i=index.get();let result=(||->Result<()>{match i{0=>snapshot(&u,&dir.join("Welcome-FA.png"))?,1=>u.set_step(1),2=>{snapshot(&u,&dir.join("Agreement-FA.png"))?;anyhow::ensure!(u.get_agreement_content_height()>u.get_agreement_visible_height(),"Persian agreement is not scrollable");u.set_agreement_scroll_y(-(u.get_agreement_content_height()-u.get_agreement_visible_height()));},3=>{snapshot(&u,&dir.join("Agreement-End-FA.png"))?;u.set_agreement_scroll_y(0.);u.set_step(2);u.set_accepted(true)},4=>snapshot(&u,&dir.join("Location-FA.png"))?,5=>{u.set_english(true);u.invoke_language_changed();u.set_step(0)},6=>snapshot(&u,&dir.join("Welcome-EN.png"))?,7=>u.set_step(1),8=>{snapshot(&u,&dir.join("Agreement-EN.png"))?;anyhow::ensure!(u.get_agreement_content_height()>u.get_agreement_visible_height(),"English agreement is not scrollable");u.set_agreement_scroll_y(-(u.get_agreement_content_height()-u.get_agreement_visible_height()));},9=>{snapshot(&u,&dir.join("Agreement-End-EN.png"))?;u.set_agreement_scroll_y(0.);u.set_step(3);u.set_busy(true);u.set_progress(0.56)},10=>snapshot(&u,&dir.join("Installing-EN.png"))?,11=>{u.set_busy(false);u.set_step(4)},12=>snapshot(&u,&dir.join("Finish-EN.png"))?,13=>{u.set_uninstall(true);u.set_step(1);u.set_english(false);u.invoke_language_changed()},14=>{u.set_app_running(true);snapshot(&u,&dir.join("Uninstall-Running-FA.png"))?;u.set_english(true);u.invoke_language_changed()},15=>{snapshot(&u,&dir.join("Uninstall-Running-EN.png"))?;u.set_closing_app(true);u.set_busy(true)},16=>{snapshot(&u,&dir.join("Uninstall-Closing-EN.png"))?;u.set_closing_app(false);u.set_busy(false);u.set_app_running(false)},17=>snapshot(&u,&dir.join("Uninstall-EN.png"))?,18=>{anyhow::ensure!(motion_seen.get(),"No animated intermediate page state observed");fs::write(dir.join("ui-smoke.txt"),format!("PASS: bilingual FA/EN installer; complete Persian and English agreements scroll to their final section and end marker; RTL step placement; Vazir; welcome/agreement/location/progress/finish/uninstall screens; app version v{}; updated GPLv3 terms; MaxiSpace.dev / 2026 and brand rights; animated intermediate page states observed; isolated screenshots only; no host installation performed\n", operations::VERSION))?;let _=slint::quit_event_loop();},_=>()}Ok(())})();if let Err(e)=result{let _=fs::write(dir.join("ui-smoke.txt"),format!("FAIL {e:#}"));let _=slint::quit_event_loop();}index.set(i+1)});
+        timer.start(slint::TimerMode::Repeated,Duration::from_millis(700),move||{let Some(u)=w.upgrade()else{return};let i=index.get();let result=(||->Result<()>{match i{0=>snapshot(&u,&dir.join("Welcome-FA.png"))?,1=>u.set_step(1),2=>{snapshot(&u,&dir.join("Agreement-FA.png"))?;anyhow::ensure!(u.get_agreement_content_height()>u.get_agreement_visible_height(),"Persian agreement is not scrollable");u.set_agreement_scroll_y(-(u.get_agreement_content_height()-u.get_agreement_visible_height()));},3=>{snapshot(&u,&dir.join("Agreement-End-FA.png"))?;u.set_agreement_scroll_y(0.);u.set_step(2);u.set_accepted(true)},4=>snapshot(&u,&dir.join("Location-FA.png"))?,5=>{u.set_english(true);u.invoke_language_changed();u.set_step(0)},6=>snapshot(&u,&dir.join("Welcome-EN.png"))?,7=>u.set_step(1),8=>{snapshot(&u,&dir.join("Agreement-EN.png"))?;anyhow::ensure!(u.get_agreement_content_height()>u.get_agreement_visible_height(),"English agreement is not scrollable");u.set_agreement_scroll_y(-(u.get_agreement_content_height()-u.get_agreement_visible_height()));},9=>{snapshot(&u,&dir.join("Agreement-End-EN.png"))?;u.set_agreement_scroll_y(0.);u.set_step(3);u.set_busy(true);u.set_progress(0.56)},10=>snapshot(&u,&dir.join("Installing-EN.png"))?,11=>{u.set_busy(false);u.set_step(4)},12=>snapshot(&u,&dir.join("Finish-EN.png"))?,13=>{u.set_uninstall(true);u.set_step(1);u.set_english(false);u.invoke_language_changed();u.set_cable_presence(1);u.set_cable_provenance(2);u.set_fallback_state(1);u.set_fallback_name("Redragon Speakers".into());u.set_default_route_state(2);u.set_recovery_state(1);u.set_remove_cable(true);u.set_playback_outputs(Rc::new(VecModel::from(vec![PlaybackOutput{id:"fixture-physical".into(),name:"Redragon Speakers".into()},PlaybackOutput{id:"fixture-second".into(),name:"Headphones".into()}])).into());u.set_playback_output_names(Rc::new(VecModel::from(vec![slint::SharedString::from("Redragon Speakers"),slint::SharedString::from("Headphones")])).into());u.set_selected_output_index(0);u.set_selected_output_id("fixture-physical".into())},14=>{u.set_app_running(true);snapshot(&u,&dir.join("Uninstall-Running-FA.png"))?;u.set_english(true);u.invoke_language_changed()},15=>{snapshot(&u,&dir.join("Uninstall-Running-EN.png"))?;u.set_closing_app(true);u.set_busy(true)},16=>{snapshot(&u,&dir.join("Uninstall-Closing-EN.png"))?;u.set_closing_app(false);u.set_busy(false);u.set_app_running(false)},17=>snapshot(&u,&dir.join("Uninstall-EN.png"))?,18=>{u.set_english(false);u.invoke_language_changed()},19=>snapshot(&u,&dir.join("Uninstall-FA.png"))?,20=>{anyhow::ensure!(motion_seen.get(),"No animated intermediate page state observed");fs::write(dir.join("ui-smoke.txt"),format!("PASS: bilingual FA/EN installer; complete Persian and English agreements scroll to their final section and end marker; RTL step placement; Vazir; welcome/agreement/location/progress/finish/uninstall screens; app version v{}; updated GPLv3 terms; MaxiSpace.dev / 2026 and brand rights; animated intermediate page states observed; isolated screenshots only; no host installation performed\n", operations::VERSION))?;let _=slint::quit_event_loop();},_=>()}Ok(())})();if let Err(e)=result{let _=fs::write(dir.join("ui-smoke.txt"),format!("FAIL {e:#}"));let _=slint::quit_event_loop();}index.set(i+1)});
     }
     ui.run()?;
     Ok(())
@@ -617,7 +672,7 @@ fn main() {
             &message,
         );
         if std::env::args()
-            .any(|s| s == "--self-test" || s == "--native-self-test" || s == "--ui-smoke" || s == "--uninstall-self-test")
+            .any(|s| s == "--self-test" || s == "--native-self-test" || s == "--ui-smoke" || s == "--uninstall-self-test" || s.starts_with("--update-"))
         {
             eprintln!("{message}");
             std::process::exit(1);

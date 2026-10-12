@@ -40,6 +40,9 @@ static MENU_VISIBLE: AtomicBool = AtomicBool::new(false);
 static MENU_HOVER: AtomicIsize = AtomicIsize::new(-1);
 static MENU_DPI: AtomicU32 = AtomicU32::new(96);
 static MENU_KEYS_READY: AtomicBool = AtomicBool::new(false);
+static WINDOW_MOVING: AtomicBool = AtomicBool::new(false);
+static WINDOW_MINIMIZED: AtomicBool = AtomicBool::new(false);
+pub(crate) fn window_is_moving() -> bool { WINDOW_MOVING.load(Ordering::Relaxed) }
 static PRESENT_PENDING: AtomicBool = AtomicBool::new(true);
 static TX: Mutex<Option<Sender<Action>>> = Mutex::new(None);
 static EXIT_MESSAGE: AtomicU32 = AtomicU32::new(0);
@@ -60,6 +63,7 @@ pub enum Action {
     Exit,
     Refresh,
     Repaint,
+    FitWindow,
     Hotkey(usize),
     CapturedHotkey(usize, u32, u32),
     CaptureCancelled(usize),
@@ -425,6 +429,10 @@ unsafe extern "system" fn app_window_subclass(
         }
         return LRESULT(0);
     }
+    if message == WM_ENTERSIZEMOVE { WINDOW_MOVING.store(true, Ordering::Relaxed); }
+    if message == WM_EXITSIZEMOVE { WINDOW_MOVING.store(false, Ordering::Relaxed); }
+    let restored = message == WM_SIZE && !matches!(w.0 as u32, SIZE_MINIMIZED) && WINDOW_MINIMIZED.swap(false, Ordering::Relaxed);
+    if message == WM_SIZE && w.0 == SIZE_MINIMIZED as usize { WINDOW_MINIMIZED.store(true, Ordering::Relaxed); }
     if message == WM_DPICHANGED
         || (message == WM_SHOWWINDOW && w.0 != 0)
         || (message == WM_SIZE && w.0 != SIZE_MINIMIZED as usize)
@@ -437,7 +445,15 @@ unsafe extern "system" fn app_window_subclass(
     if message == WM_PAINT && PRESENT_PENDING.swap(false, Ordering::Relaxed) {
         send(Action::Repaint);
     }
-    unsafe { DefSubclassProc(hwnd, message, w, l) }
+    let result = unsafe { DefSubclassProc(hwnd, message, w, l) };
+    // Queue after Winit applies the suggested DPI rectangle; no correction
+    // during interactive move/resize or a stream of WM_SIZE notifications.
+    if restored || matches!(message, WM_DPICHANGED | WM_EXITSIZEMOVE | WM_DISPLAYCHANGE | WM_SETTINGCHANGE)
+        || (message == WM_SHOWWINDOW && w.0 != 0)
+    {
+        send(Action::FitWindow);
+    }
+    result
 }
 const MENU_WIDTH: i32 = 252;
 const MENU_HEADER: i32 = 48;
@@ -639,7 +655,7 @@ unsafe fn draw_row_icon(dc: HDC, row: i32, cx: i32, cy: i32, scale: impl Fn(i32)
     }
     unsafe { let _ = SelectObject(dc, old); let _ = DeleteObject(pen.into()); }
 }
-fn own_window() -> Option<HWND> {
+pub(crate) fn own_window() -> Option<HWND> {
     unsafe extern "system" fn enumerate(hwnd: HWND, data: LPARAM) -> windows::core::BOOL {
         let mut pid = 0;
         unsafe {

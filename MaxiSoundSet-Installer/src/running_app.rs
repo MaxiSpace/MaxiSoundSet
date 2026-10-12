@@ -73,8 +73,14 @@ fn processes(root: &Path) -> Result<Vec<Process>> {
             } {
                 Ok(handle) => {
                     let process = Process(handle);
-                    if unsafe { WaitForSingleObject(process.0, 0) }
-                        == windows::Win32::Foundation::WAIT_TIMEOUT
+                    let state = unsafe { WaitForSingleObject(process.0, 0) };
+                    ensure!(
+                        state == windows::Win32::Foundation::WAIT_TIMEOUT
+                            || state == windows::Win32::Foundation::WAIT_OBJECT_0,
+                        "Cannot verify the running application: {}",
+                        windows::core::Error::from_win32()
+                    );
+                    if state == windows::Win32::Foundation::WAIT_TIMEOUT
                         && matches(process.0, &executable)
                             .context("Cannot verify the running MAXI SOUNDSET installation")?
                     {
@@ -104,8 +110,13 @@ pub fn is_running(root: &Path) -> Result<bool> {
     Ok(!processes(root)?.is_empty())
 }
 pub fn close(root: &Path) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(1);
     crate::operations::manifest(root)?;
     let processes = processes(root)?;
+    ensure!(
+        processes.len() <= 64,
+        "Too many application processes to verify safe exit"
+    );
     let message = unsafe {
         RegisterWindowMessageW(PCWSTR(
             crate::platform::wide("MAXISOUNDSET.RequestSafeExit.v1").as_ptr(),
@@ -123,25 +134,36 @@ pub fn close(root: &Path) -> Result<()> {
             GetWindowThreadProcessId(hwnd, Some(&mut pid));
         }
         // Retain the process handle and verify its identity before posting.
-        if pid == unsafe { GetProcessId(request.handle) }
-            && unsafe { WaitForSingleObject(request.handle, 0) }
-                == windows::Win32::Foundation::WAIT_TIMEOUT
-        {
+        if pid == unsafe { GetProcessId(request.handle) } {
+            let state = unsafe { WaitForSingleObject(request.handle, 0) };
+            if state != windows::Win32::Foundation::WAIT_TIMEOUT
+                && state != windows::Win32::Foundation::WAIT_OBJECT_0
+            {
+                return false.into(); // EnumWindows fails; do not authorize deletion.
+            }
+            if state == windows::Win32::Foundation::WAIT_OBJECT_0 {
+                return true.into();
+            }
             unsafe {
                 let _ = PostMessageW(Some(hwnd), request.message, WPARAM(0), LPARAM(0));
             }
         }
         true.into()
     }
-    // A freshly launched process may still be completing its first device scan while the
-    // installer requests shutdown. Give the cooperative path time to restore audio and exit.
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // Repost while a newly launched process creates its window, but wake immediately
+    // when all held process handles signal. Never kill a slow restoration worker.
+    let handles: Vec<HANDLE> = processes.iter().map(|process| process.0).collect();
     loop {
         let mut waiting = false;
         for process in &processes {
-            if unsafe { WaitForSingleObject(process.0, 0) }
-                == windows::Win32::Foundation::WAIT_TIMEOUT
-            {
+            let state = unsafe { WaitForSingleObject(process.0, 0) };
+            ensure!(
+                state == windows::Win32::Foundation::WAIT_TIMEOUT
+                    || state == windows::Win32::Foundation::WAIT_OBJECT_0,
+                "Cannot verify application exit: {}",
+                windows::core::Error::from_win32()
+            );
+            if state == windows::Win32::Foundation::WAIT_TIMEOUT {
                 waiting = true;
                 let request_data = Request {
                     handle: process.0,
@@ -159,11 +181,20 @@ pub fn close(root: &Path) -> Result<()> {
             break;
         }
         ensure!(Instant::now() < deadline, "The application has not exited. Open it and use Exit app, then retry. Older versions may require manual exit.");
-        std::thread::sleep(Duration::from_millis(100));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let timeout = remaining.as_millis().min(25) as u32;
+        let state = unsafe { WaitForMultipleObjects(&handles, true, timeout) };
+        ensure!(
+            state == windows::Win32::Foundation::WAIT_TIMEOUT
+                || state == windows::Win32::Foundation::WAIT_OBJECT_0,
+            "Cannot wait for application exit: {}",
+            windows::core::Error::from_win32()
+        );
     }
     ensure!(
         !is_running(root)?,
         "The application was reopened. Close it before removing files."
     );
+    ensure!(Instant::now() <= deadline, "Safe exit did not complete within one second. Files were kept; let audio restore, then retry.");
     Ok(())
 }

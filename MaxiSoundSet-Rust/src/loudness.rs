@@ -111,16 +111,42 @@ pub struct ProgrammeLevel {
     transition: f64,
     fast_tracking: bool,
     fast_weight: f64,
+    silence_time: f64,
+    return_time: f64,
+    recovery_time: f64,
     pub level: f64,
 }
 impl ProgrammeLevel {
     pub fn may_boost(&self) -> bool {
         self.boost_hold <= 0.
     }
+    pub fn recovering_after_pause(&self) -> bool {
+        self.recovery_time > 0.
+    }
     pub fn update(&mut self, rms: f64, dt: f64) -> f64 {
         self.boost_hold = (self.boost_hold - dt).max(0.);
+        self.recovery_time = (self.recovery_time - dt).max(0.);
         if rms > 0.001 {
             let power = rms * rms;
+            if self.initialized && self.silence_time >= 0.12 {
+                self.return_time += dt;
+                if self.return_time >= 0.02 {
+                    self.fast = power;
+                    self.slow = power;
+                    self.initialized = true;
+                    self.falling = false;
+                    self.transition = 0.;
+                    self.fast_tracking = false;
+                    self.fast_weight = 0.;
+                    self.boost_hold = 0.;
+                    self.silence_time = 0.;
+                    self.return_time = 0.;
+                    self.recovery_time = 0.3;
+                }
+            } else {
+                self.silence_time = 0.;
+                self.return_time = 0.;
+            }
             if !self.initialized {
                 self.fast = power;
                 self.slow = power;
@@ -154,6 +180,10 @@ impl ProgrammeLevel {
             self.fast_weight += (weight - self.fast_weight) * (1.0 - (-dt / 0.04).exp());
             let fast_mix = 0.25 + 0.75 * self.fast_weight;
             self.level = (self.fast * fast_mix + self.slow * (1.0 - fast_mix)).sqrt();
+        } else {
+            self.silence_time += dt;
+            self.return_time = 0.;
+            self.recovery_time = 0.;
         }
         self.level
     }
@@ -189,5 +219,32 @@ mod tests {
         }
         assert!((a.rms - b.rms).abs() < 1e-12);
         assert!((a.programme.level - b.programme.level).abs() < 1e-12);
+    }
+    #[test]
+    fn pause_recovery_requires_prior_audio_and_stable_return() {
+        let mut p = ProgrammeLevel::default();
+        for _ in 0..40 {
+            p.update(0.0001, 0.01);
+        }
+        p.update(0.02, 0.01);
+        assert!(!p.recovering_after_pause());
+        for _ in 0..50 {
+            p.update(0.02, 0.01);
+        }
+        for _ in 0..10 {
+            p.update(0.0001, 0.01);
+        }
+        p.update(0.02, 0.01);
+        assert!(!p.recovering_after_pause());
+        for _ in 0..40 {
+            p.update(0.0001, 0.01);
+        }
+        p.update(0.02, 0.01);
+        assert!(!p.recovering_after_pause());
+        p.update(0.02, 0.01);
+        assert!(p.recovering_after_pause());
+        assert!((p.level - 0.02).abs() < 1e-6);
+        p.update(0.0001, 0.01);
+        assert!(!p.recovering_after_pause());
     }
 }

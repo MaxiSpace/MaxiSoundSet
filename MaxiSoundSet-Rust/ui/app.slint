@@ -8,8 +8,14 @@ export struct LevelPoint { input: float, output: float }
 export struct ConflictRow { pid: int, name: string, exe: string }
 export struct LogRow { time: string, level: string, message: string }
 export struct HotkeyRow { name: string, chord: string, enabled: bool, error: string }
+export struct ControlBounds { x: length, y: length, width: length, height: length }
 
 export global Locale { in-out property <bool> rtl: true; }
+export global Viewport {
+    in-out property <length> width;
+    in-out property <length> height;
+    callback reveal(length, length, length);
+}
 
 global Colors {
     out property <color> bg: #090e22;
@@ -22,6 +28,7 @@ global Colors {
 }
 
 component Action inherits Rectangle {
+    in property <bool> reveal-on-focus: true;
     in property <string> text;
     in property <bool> primary: false;
     in property <bool> selected: false;
@@ -49,8 +56,9 @@ component Action inherits Rectangle {
     accessible-enabled: root.enabled;
     accessible-action-default => { if root.enabled { root.clicked(); } }
     forward-focus: focus;
+    out property <bool> has-keyboard-focus: focus.has-focus;
     Text { width: parent.width; height: parent.height; y: touch.pressed ? 1px : 0px; animate y { duration: 100ms; easing: ease-out; } text: root.text; color: root.enabled ? Colors.text : #6a7c99; font-size: 12px; font-weight: root.primary ? 700 : 500; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
-    focus := FocusScope { enabled: root.enabled; key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.clicked(); return accept; } return reject; } }
+    focus := FocusScope { enabled: root.enabled; focus-changed-event => { if self.has-focus && root.reveal-on-focus { Viewport.reveal(root.absolute-position.x, root.absolute-position.y, root.height); } } key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.clicked(); return accept; } return reject; } }
     touch := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { focus.focus(); root.clicked(); } }
     if focus.has-focus: Rectangle { border-radius: 14px; border-width: 1px; border-color: Colors.accent; background: transparent; }
 }
@@ -79,7 +87,7 @@ component Toggle inherits Rectangle {
         }
     }
     Text { horizontal-alignment: Locale.rtl ? right : left; x: Locale.rtl ? 0px : 59px; width: max(0px, parent.width - 59px); height: parent.height; text: root.text; color: root.enabled ? Colors.text : Colors.muted; font-size: 12px; vertical-alignment: center; overflow: elide; }
-    focus := FocusScope { enabled: root.enabled; key-pressed(e) => { if e.text == " " || e.text == Key.Return { root.flip(); return accept; } return reject; } }
+    focus := FocusScope { enabled: root.enabled; focus-changed-event => { if self.has-focus { Viewport.reveal(root.absolute-position.x, root.absolute-position.y, root.height); } } key-pressed(e) => { if e.text == " " || e.text == Key.Return { root.flip(); return accept; } return reject; } }
     touch := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { focus.focus(); root.flip(); } }
 }
 
@@ -93,11 +101,11 @@ component HotkeySettingRow inherits Rectangle {
     callback record(int);
     callback toggle(int, bool);
     callback clear(int);
-    min-height: 62px; preferred-height: 62px; vertical-stretch: 0;
+    min-height: root.width < 660px ? 110px : 62px; preferred-height: root.width < 660px ? 110px : 62px; vertical-stretch: 0;
     border-radius: 13px; background: #0b1730; border-width: 1px; border-color: root.capturing ? Colors.accent : Colors.border;
-    FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; spacing: 10px; padding: 9px;
+    FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: root.width < 660px ? wrap : no-wrap; alignment: stretch; spacing: 10px; padding: 9px;
         VerticalLayout { layout-order: Locale.rtl ? 0 : 0; horizontal-stretch: 1; spacing: 3px;
-            Text { horizontal-alignment: Locale.rtl ? right : left; text: root.name; color: Colors.text; font-size: 12px; font-weight: 650; vertical-alignment: center; }
+            Text { wrap: word-wrap; horizontal-alignment: Locale.rtl ? right : left; text: root.name; color: Colors.text; font-size: 12px; font-weight: 650; vertical-alignment: center; }
             Text { horizontal-alignment: Locale.rtl ? right : left; text: root.error; color: root.error != "" ? #ffad9b : Colors.muted; font-size: 10px; overflow: elide; }
         }
         Text { layout-order: Locale.rtl ? -1 : 1; text: root.capturing ? (Locale.rtl ? "ترکیب را بزن…" : "Press shortcut…") : root.chord; width: 135px; color: root.capturing ? #a6e8ff : Colors.muted; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
@@ -108,6 +116,7 @@ component HotkeySettingRow inherits Rectangle {
 }
 
 component HelpButton inherits Rectangle {
+    in property <bool> reveal-on-focus: true;
     in property <string> title;
     in property <string> message;
     in property <string> label;
@@ -121,10 +130,10 @@ component HelpButton inherits Rectangle {
     public function open-help() { popup.show(); }
     public function close-help() { popup.close(); }
     Text { width: parent.width; height: parent.height; text: "?"; color: #bfefff; font-size: 11px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
-    focus := FocusScope { key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.open-help(); return accept; } return reject; } }
+    focus := FocusScope { focus-changed-event => { if self.has-focus && root.reveal-on-focus { Viewport.reveal(root.absolute-position.x, root.absolute-position.y, root.height); } } key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.open-help(); return accept; } return reject; } }
     touch := TouchArea { mouse-cursor: pointer; clicked => { focus.focus(); root.open-help(); } }
     popup := PopupWindow {
-        x: Locale.rtl ? 0px : root.width - 300px; y: -133px; width: 300px; height: 126px;
+        x: clamp(Locale.rtl ? 0px : root.width - 300px, 8px - root.absolute-position.x, Viewport.width - 308px - root.absolute-position.x); y: clamp(-133px, 8px - root.absolute-position.y, Viewport.height - 134px - root.absolute-position.y); width: 300px; height: 126px;
         close-policy: close-on-click-outside;
         forward-focus: popup-focus;
         popup-focus := FocusScope {
@@ -146,6 +155,7 @@ component HelpButton inherits Rectangle {
 }
 
 component ComboBox inherits Rectangle {
+    in property <bool> reveal-on-focus: true;
     in property <[string]> model;
     in property <bool> enabled: true;
     in-out property <int> current-index: 0;
@@ -175,7 +185,7 @@ component ComboBox inherits Rectangle {
         Text { layout-order: Locale.rtl ? 0 : 0; horizontal-stretch: 1; horizontal-alignment: Locale.rtl ? right : left; text: root.current-value; color: root.enabled ? Colors.text : Colors.muted; overflow: elide; vertical-alignment: center; }
         Text { layout-order: Locale.rtl ? -1 : 1; text: root.expanded ? "−" : "+"; width: 15px; color: Colors.muted; vertical-alignment: center; horizontal-alignment: center; }
     }
-    focus := FocusScope { enabled: root.enabled;
+    focus := FocusScope { enabled: root.enabled; focus-changed-event => { if self.has-focus && root.reveal-on-focus { Viewport.reveal(root.absolute-position.x, root.absolute-position.y, root.height); } }
         key-pressed(event) => {
             if event.text == Key.UpArrow { root.choose(root.current-index - 1); return accept; }
             if event.text == Key.DownArrow { root.choose(root.current-index + 1); return accept; }
@@ -185,7 +195,7 @@ component ComboBox inherits Rectangle {
     }
     touch := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { focus.focus(); root.open-menu(); } }
     popup := PopupWindow {
-        x: 0px; y: root.height + 6px; width: root.width;
+        x: clamp(0px, 8px - root.absolute-position.x, Viewport.width - root.width - 8px - root.absolute-position.x); y: clamp(root.height + 6px, 8px - root.absolute-position.y, Viewport.height - self.height - 8px - root.absolute-position.y); width: root.width;
         height: min(root.model.length, 6) * 38px + 16px;
         close-policy: close-on-click-outside;
         forward-focus: menu-focus;
@@ -239,7 +249,7 @@ component TargetSlider inherits Rectangle {
         drop-shadow-color: root.enabled && (touch.has-hover || focus.has-focus) ? #64cdff75 : #64cdff28; drop-shadow-blur: 14px;
         animate width, drop-shadow-color { duration: 150ms; easing: ease-out; }
     }
-    focus := FocusScope { enabled: root.enabled; key-pressed(e) => {
+    focus := FocusScope { enabled: root.enabled; focus-changed-event => { if self.has-focus { Viewport.reveal(root.absolute-position.x, root.absolute-position.y, root.height); } } key-pressed(e) => {
         if e.text == Key.LeftArrow { root.changed(clamp(root.value + (Locale.rtl ? 1 : -1), root.minimum, root.maximum)); return accept; }
         if e.text == Key.RightArrow { root.changed(clamp(root.value + (Locale.rtl ? -1 : 1), root.minimum, root.maximum)); return accept; }
         if e.text == Key.Home { root.changed(root.minimum); return accept; }
@@ -267,7 +277,7 @@ component SpinBox inherits Rectangle {
                 edited => { root.text-dirty = true; }
                 accepted => { root.apply-text(); root.text-dirty = false; }
                 // Commit after typing, so entering 100 does not first select 1.
-                changed has-focus => { if !self.has-focus && root.text-dirty { root.apply-text(); root.text-dirty = false; } }
+                changed has-focus => { if self.has-focus { Viewport.reveal(root.absolute-position.x, root.absolute-position.y, root.height); } if !self.has-focus && root.text-dirty { root.apply-text(); root.text-dirty = false; } }
             }
         }
         Action { text: "+"; width: 30px; enabled: root.enabled && root.value < root.maximum; clicked => { root.value = min(root.maximum, root.value + 1); root.edited(); } }
@@ -295,7 +305,7 @@ component EqFader inherits Rectangle {
         animate width, drop-shadow-color { duration: 140ms; easing: ease-out; }
     }
     Text { text: root.frequency; color: Colors.muted; font-size: 10px; y: parent.height - 19px; height: 19px; width: parent.width; horizontal-alignment: center; }
-    focus := FocusScope { enabled: root.enabled; key-pressed(e) => {
+    focus := FocusScope { enabled: root.enabled; focus-changed-event => { if self.has-focus { Viewport.reveal(root.absolute-position.x, root.absolute-position.y, root.height); } } key-pressed(e) => {
         if e.text == Key.UpArrow { root.changed(min(12,root.value + 0.5)); return accept; }
         if e.text == Key.DownArrow { root.changed(max(-12,root.value - 0.5)); return accept; }
         if e.text == Key.Home { root.changed(0); return accept; } return reject;
@@ -366,7 +376,13 @@ component TechnologyCredit inherits Rectangle {
             horizontal-alignment: center;
         }
     }
-    TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+    accessible-role: button;
+    accessible-label: root.website;
+    accessible-action-default => { root.clicked(); }
+    forward-focus: focus;
+    focus := FocusScope { focus-changed-event => { if self.has-focus { Viewport.reveal(root.absolute-position.x, root.absolute-position.y, root.height); } } key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.clicked(); return accept; } return reject; } }
+    TouchArea { mouse-cursor: pointer; clicked => { focus.focus(); root.clicked(); } }
+    if focus.has-focus: Rectangle { background: transparent; border-radius: 14px; border-width: 1px; border-color: Colors.accent; }
 }
 
 component PageSurface inherits Rectangle {
@@ -379,6 +395,8 @@ component PageSurface inherits Rectangle {
 
 
 component NavAction inherits Rectangle {
+    out property <bool> has-keyboard-focus: focus.has-focus;
+    in property <bool> reveal-on-focus: true;
     in property <string> text; in property <image> icon;
     in property <bool> selected: false; in property <bool> expanded: true;
     in property <int> order: 0;
@@ -395,19 +413,92 @@ component NavAction inherits Rectangle {
     forward-focus: focus;
     nav-icon := Image { source: root.icon; width: 22px; height: 22px; x: Locale.rtl ? parent.width - self.width - 15px : 15px; y: (parent.height - self.height)/2; colorize: root.selected ? #77e2ef : #acc2dc; animate colorize { duration: 180ms; easing: ease-out; } }
     Text { horizontal-alignment: Locale.rtl ? right : left; x: Locale.rtl ? 10px : 48px; width: max(0px,parent.width - 58px); height: parent.height; text: root.text; color: Colors.text; font-size: 13px; font-weight: root.selected ? 700 : 500; vertical-alignment: center; opacity: root.expanded ? 1 : 0; animate opacity { duration: 180ms; delay: root.expanded ? root.order * 18ms : 0ms; easing: ease-out; } overflow: elide; }
-    focus := FocusScope { key-pressed(e) => { if e.text == Key.Return || e.text == " " { root.clicked(); return accept; } return reject; } }
+    focus := FocusScope { focus-changed-event => { if self.has-focus && root.reveal-on-focus { Viewport.reveal(root.absolute-position.x, root.absolute-position.y, root.height); } } key-pressed(e) => { if e.text == Key.Return || e.text == " " { root.clicked(); return accept; } return reject; } }
     touch := TouchArea { mouse-cursor: pointer; clicked => { focus.focus(); root.clicked(); } }
     if focus.has-focus: Rectangle { background: transparent; border-radius: 23px; border-width: 1px; border-color: Colors.accent; }
 }
 export component AppWindow inherits Window {
-    init => { Palette.color-scheme = ColorScheme.dark; Locale.rtl = !root.english; }
-    changed english => { Locale.rtl = !root.english; }
+    init => { Palette.color-scheme = ColorScheme.dark; Locale.rtl = !root.english; Viewport.width = root.width; Viewport.height = root.height; }
+
+    changed height => { Viewport.height = root.height; }
+    changed english => { Locale.rtl = !root.english; if root.compact-menu-presented { root.dismiss-sidebar-menu(); sidebar-toggle.focus(); } }
     title: "MAXI SOUNDSET";
     icon: @image-url("../assets/icon.png");
     preferred-width: 1280px;
     preferred-height: 860px;
-    min-width: 1120px;
-    min-height: 760px;
+    min-width: 640px;
+    min-height: 320px;
+    property <bool> compact: false; changed width => { root.compact = self.width < 1100px; Viewport.width = root.width; if !root.compact && root.compact-menu-presented { root.dismiss-sidebar-menu(); sidebar-toggle.focus(); } }
+    property <bool> stacked: false;
+    property <bool> compact-menu-open: false;
+    property <bool> compact-menu-presented: false;
+    property <float> compact-menu-reveal: 0;
+    animate compact-menu-reveal { duration: 200ms; easing: cubic-bezier(0.2,0,0,1); }
+    out property <bool> sidebar-menu-open: root.compact-menu-open;
+    out property <bool> sidebar-menu-presented: root.compact-menu-presented;
+    close-menu-timer := Timer { interval: 200ms; running: false; triggered => {
+        self.running = false;
+        if !root.compact-menu-open { root.compact-menu-presented = false; sidebar-toggle.focus(); }
+    } }
+    out property <length> body-width: body-host.width;
+    out property <length> body-x: body-host.x;
+    out property <length> sound-scroll-offset: sound-scroll.content-y;
+    out property <length> sidebar-menu-x: sidebar-panel.x;
+    out property <length> sidebar-menu-width: sidebar-panel.width;
+    out property <int> sidebar-focus-index: sidebar-toggle.has-keyboard-focus ? 0 : sound-nav.has-keyboard-focus ? 1 : components-nav.has-keyboard-focus ? 2 : log-nav.has-keyboard-focus ? 3 : settings-nav.has-keyboard-focus ? 4 : conflicts-nav.has-keyboard-focus ? 5 : about-nav.has-keyboard-focus ? 6 : donate-nav.has-keyboard-focus ? 7 : language-nav.has-keyboard-focus ? 8 : exit-nav.has-keyboard-focus ? 9 : -1;
+    public function sidebar-control-bounds(index: int) -> ControlBounds {
+        if index == 0 { return {x: sidebar-toggle.absolute-position.x, y: sidebar-toggle.absolute-position.y, width: sidebar-toggle.width, height: sidebar-toggle.height}; }
+        return {x: sound-nav.absolute-position.x, y: index == 1 ? sound-nav.absolute-position.y : index == 2 ? components-nav.absolute-position.y : index == 3 ? log-nav.absolute-position.y : index == 4 ? settings-nav.absolute-position.y : index == 5 ? conflicts-nav.absolute-position.y : index == 6 ? about-nav.absolute-position.y : index == 7 ? donate-nav.absolute-position.y : index == 8 ? language-nav.absolute-position.y : exit-nav.absolute-position.y, width: sound-nav.width, height: sound-nav.height};
+    }
+    out property <ControlBounds> log-file-control-bounds: {x: log-file-action.absolute-position.x, y: log-file-action.absolute-position.y, width: log-file-action.width, height: log-file-action.height};
+    out property <ControlBounds> rust-control-bounds: {x: rust-credit.absolute-position.x, y: rust-credit.absolute-position.y, width: rust-credit.width, height: rust-credit.height};
+    public function focus-rust-credit() { rust-credit.focus(); }
+    out property <bool> components-actions-centered: abs(install-action.absolute-position.x + install-action.width / 2 - components-scroll.absolute-position.x - components-scroll.visible-width / 2) < 1px && abs(website-action.absolute-position.x + website-action.width / 2 - components-scroll.absolute-position.x - components-scroll.visible-width / 2) < 1px;
+    out property <bool> component-header-stacked: body-host.width < 520px;
+    out property <ControlBounds> component-heading-bounds: {x: components-heading.absolute-position.x, y: components-heading.absolute-position.y, width: components-heading.width, height: components-heading.height};
+    out property <string> component-display-message: root.component-check-state == 1 ? (root.english ? "Checking the official VB-Audio website…" : "در حال بررسی وب‌سایت رسمی VB-Audio…")
+        : root.component-check-state == 2 ? (root.english ? "A newer VB-CABLE package is available." : "بستهٔ جدیدتری برای VB-CABLE موجود است.")
+        : root.component-check-state == 3 ? (root.english ? "No newer VB-CABLE package is available." : "بستهٔ جدیدتری برای VB-CABLE موجود نیست.")
+        : root.component-check-state == 4 ? (root.english ? "VB-CABLE is installed; its package version is unknown." : "کابل VB-CABLE نصب است؛ نسخهٔ بستهٔ آن نامشخص است.")
+        : root.component-check-state == 5 ? (root.english ? "Could not check VB-CABLE updates. Try again." : "بررسی آپدیت VB-CABLE انجام نشد؛ دوباره تلاش کنید.")
+        : root.component-check-state == 6 ? (root.english ? "VB-CABLE is not installed. The latest package is available." : "کابل VB-CABLE نصب نیست؛ آخرین بسته موجود است.") : root.component-message;
+    out property <bool> component-progress-visible: root.components-busy && root.components-installing;
+    public function component-control-bounds(index: int) -> ControlBounds {
+        if index == 0 { return {x: updates-action.absolute-position.x, y: updates-action.absolute-position.y, width: updates-action.width, height: updates-action.height}; }
+        if index == 1 { return {x: install-action.absolute-position.x, y: install-action.absolute-position.y, width: install-action.width, height: install-action.height}; }
+        return {x: website-action.absolute-position.x, y: website-action.absolute-position.y, width: website-action.width, height: website-action.height};
+    }
+    public function focus-sidebar-item(index: int) {
+        if index == 0 { sidebar-toggle.focus(); }
+        if index == 1 { sound-nav.focus(); }
+        if index == 2 { components-nav.focus(); }
+        if index == 3 { log-nav.focus(); }
+        if index == 4 { settings-nav.focus(); }
+        if index == 5 { conflicts-nav.focus(); }
+        if index == 6 { about-nav.focus(); }
+        if index == 7 { donate-nav.focus(); }
+        if index == 8 { language-nav.focus(); }
+        if index == 9 { exit-nav.focus(); }
+    }
+    public function dismiss-sidebar-menu() { close-menu-timer.running = false; root.compact-menu-open = false; root.compact-menu-presented = false; root.compact-menu-reveal = 0; }
+    public function close-sidebar-menu() {
+        if !root.compact-menu-open { return; }
+        root.compact-menu-open = false;
+        root.compact-menu-reveal = 0;
+        sidebar-toggle.focus();
+        close-menu-timer.running = true;
+    }
+    public function toggle-sidebar() {
+        if root.pending-conflict >= 0 { return; }
+        if root.compact {
+            if root.compact-menu-open { root.close-sidebar-menu(); }
+            else { root.close-routing-help(); root.close-profile-menu(); root.close-preview-menu(); close-menu-timer.running = false; root.compact-menu-presented = true; root.compact-menu-open = true; root.compact-menu-reveal = 1; sidebar-toggle.focus(); }
+        } else { root.sidebar-expanded = !root.sidebar-expanded; }
+    }
+    public function select-page(index: int) { root.page = index; if root.compact-menu-open { root.close-sidebar-menu(); } }
+    property <bool> sidebar-open: root.sidebar-expanded && !root.compact;
+    property <bool> log-header-stacked: body-host.width < 740px;
+    out property <bool> log-header-fits: log-heading.absolute-position.x >= body-host.absolute-position.x && log-heading.absolute-position.x + log-heading.width <= body-host.absolute-position.x + body-host.width && log-actions.absolute-position.x >= body-host.absolute-position.x && log-actions.absolute-position.x + log-actions.width <= body-host.absolute-position.x + body-host.width && log-actions.absolute-position.y + log-actions.height <= body-host.absolute-position.y + body-host.height;
     background: @linear-gradient(135deg, #090e22 0%, #00193f 100%);
     default-font-family: "Vazir";
     default-font-size: 13px;
@@ -419,7 +510,7 @@ export component AppWindow inherits Window {
     in-out property <int> boost: 24;
     in-out property <int> reaction: 1;
     in-out property <int> intensity: 1;
-    in-out property <int> mode: 0;
+    in-out property <int> mode: 0; changed mode => { if root.mode == 0 { profile-menu.close-menu(); } }
     in-out property <int> profile: 1;
     in property <[EqBand]> eq-bands;
     in-out property <string> volume-notice;
@@ -433,20 +524,27 @@ export component AppWindow inherits Window {
     in-out property <bool> startup-active: false;
     in property <string> startup-message;
     in property <string> app-version;
-    property <string> version-label: "v1.0.2";
+    property <string> version-label: "v" + root.app-version;
     out property <string> sidebar-brand-text: root.english ? "MAXI\nSOUNDSET" : "مکسی سَوندسِت";
     out property <string> log-label: root.english ? "Log" : "لاگ";
     out property <string> gain-label: root.english ? "GAIN" : "بهره صدا";
     in property <string> rust-version;
     in property <string> slint-version: "1.18.0";
     in property <string> dependency-versions;
-    in-out property <int> app-update-state: 0; // 0 idle, 1 checking, 2 current, 3 available, 4 error
+    in-out property <int> app-update-state: 0; // 0 idle, 1 checking, 2 current, 3 available, 4 error, 5 download, 6 verify, 7 handoff, 8 cancelled, 9 updated, 10 rolled back, 11 recovery required
     in-out property <string> app-latest-version: "";
+    in-out property <float> app-update-progress: 0;
+    in-out property <bool> app-update-installable: false;
+    in-out property <bool> app-release-notes-ready: false;
+    in-out property <bool> app-update-cancelling: false;
+    in-out property <int> app-update-error-kind: 0;
+    property <bool> app-update-working: root.app-update-state == 1 || (root.app-update-state >= 5 && root.app-update-state <= 7);
     in property <[ConflictRow]> conflicts;
     in property <[HotkeyRow]> hotkey-rows;
     in-out property <int> hotkey-capture-index: -1;
     in property <string> conflict-message;
     property <int> pending-conflict: -1;
+    changed pending-conflict => { if root.pending-conflict >= 0 { root.dismiss-sidebar-menu(); confirmation-cancel.focus(); } else { sidebar-toggle.focus(); } }
     property <string> pending-name;
     in-out property <bool> sidebar-expanded: true;
     out property <string> exact-target-text: exact-target.input-text;
@@ -472,14 +570,22 @@ export component AppWindow inherits Window {
     in property <bool> devices-ready: false;
     in property <bool> recovery-ready: false;
     out property <bool> cable-warning-visible: root.devices-ready && !root.cable-installed;
-    out property <bool> enhancement-hint-visible: root.profile != 0 && root.mode == 0;
-    out property <bool> minimum-size-valid: root.width >= 1120px && root.height >= 760px;
-    out property <bool> sound-layout-fits: control-strip.x >= 0px && control-strip.x + control-strip.width <= body-host.width && target-card.x >= 0px && target-card.x + target-card.width <= body-host.width && enhancement-card.y + enhancement-card.height <= body-host.height && tuning-card.y + tuning-card.height <= body-host.height;
+    out property <bool> enhancement-hint-visible: root.mode == 0;
+    out property <bool> enhancement-available: root.mode == 1;
+    out property <bool> enhancement-checked-effective: root.enhancement-available && root.profile != 0;
+    out property <bool> treble-available: root.enhancement-checked-effective;
+    out property <bool> treble-checked-effective: root.treble-available && root.treble-smoothing;
+    out property <string> processing-mode-warning: root.english ? "Requires switching to virtual cable processing mode." : "نیازمند تغییر حالت به پردازش کابل مجازی";
+    out property <ControlBounds> enhancement-toggle-bounds: {x: enhancement-toggle.absolute-position.x, y: enhancement-toggle.absolute-position.y, width: enhancement-toggle.width, height: enhancement-toggle.height};
+    out property <ControlBounds> treble-toggle-bounds: {x: treble-toggle.absolute-position.x, y: treble-toggle.absolute-position.y, width: treble-toggle.width, height: treble-toggle.height};
+    out property <bool> minimum-size-valid: root.width >= 640px && root.height >= 320px;
+    out property <bool> sound-layout-fits: control-strip.x >= 0px && control-strip.x + control-strip.width <= body-host.width && target-card.x >= 0px && target-card.x + target-card.width <= body-host.width && playback-control-field.y + playback-control-field.height <= control-strip.height && sound-cards.width <= sound-scroll.visible-width + 1px;
     out property <length> playback-device-width: playback-device-field.width;
     out property <length> processing-mode-width: processing-mode-field.width;
     in property <bool> limited: false;
     in property <bool> boost-limited: false;
     in property <string> status: "Ready";
+    in property <int> measurement-source: 0;
     in property <string> input-text: "0";
     in property <string> output-text: "0";
     in property <string> gain-text: "0.0 dB";
@@ -498,7 +604,7 @@ export component AppWindow inherits Window {
     out property <length> gain-fill-x: gain-meter.fill-x;
     out property <bool> about-rights-fits: about-rights.y + about-rights.height <= about-overview.height - 16px;
     out property <bool> about-cards-separated: about-overview.y + about-overview.height < about-tech.y;
-    out property <bool> about-notices-fit: about-notices.y + about-notices.height <= body-host.height;
+    out property <bool> about-notices-fit: about-notices.y + about-notices.height <= about-scroll.content-height;
     out property <bool> about-credits-fit: rust-credit.y + rust-credit.height <= about-tech.y + about-tech.height - 22px && slint-credit.y + slint-credit.height <= about-tech.y + about-tech.height - 22px;
     out property <bool> about-layout-fits: root.about-rights-fits && root.about-cards-separated && root.about-notices-fit && root.about-credits-fit;
     in property <float> input-level: 0;
@@ -510,6 +616,8 @@ export component AppWindow inherits Window {
     in property <bool> cable-installed: false;
     in property <bool> update-available: false;
     in property <bool> components-busy: false;
+    in property <bool> components-installing: false;
+    in property <int> component-check-state: 0; // 0 install/idle, 1 checking, 2 newer, 3 current, 4 unknown, 5 error, 6 absent
     in property <float> download-progress: 0;
     in property <string> component-message: "";
     in property <string> log-folder: "";
@@ -528,105 +636,122 @@ export component AppWindow inherits Window {
     callback reset-equalizer();
     callback refresh-devices();
     callback install-components();
+    callback download-components-again();
     callback check-updates();
     callback check-app-update();
+    callback open-app-release-notes();
+    callback install-app-update();
+    callback cancel-app-update();
     callback open-licenses();
     callback open-log-folder();
     callback open-log-file();
     callback open-link(string);
     callback clear-log-view();
     callback exit-app();
-    public function set-enhancement(on: bool) { if on { root.profile = clamp(root.last-profile, 1, 7); } else { if root.profile != 0 { root.last-profile = root.profile; } root.profile = 0; } root.config-changed(); }
-    public function choose-profile(index: int) { root.profile = index; if index != 0 { root.last-profile = index; } root.config-changed(); }
+    public function set-enhancement(on: bool) { if root.enhancement-available { if on { root.profile = clamp(root.last-profile, 1, 7); } else { if root.profile != 0 { root.last-profile = root.profile; } root.profile = 0; } root.config-changed(); } }
+    public function choose-profile(index: int) { if root.enhancement-available { root.profile = index; if index != 0 { root.last-profile = index; } root.config-changed(); } }
+    public function request-treble-smoothing(on: bool) { if root.treble-available { root.treble-smoothing = on; root.config-changed(); } }
+    public function scroll-to-equalizer() { sound-scroll.content-y = clamp(sound-scroll.content-y + sound-scroll.absolute-position.y - equalizer-card.absolute-position.y, -root.sound-scroll-range, 0px); }
+    public function focus-page() { page-focus.focus(); }
+    public function preview-confirmation() { root.pending-name = root.english ? "Example audio processor" : "پردازشگر صوتی نمونه"; root.pending-conflict = 123; }
+    public function close-preview-confirmation() { root.pending-conflict = -1; }
     public function preview-menu() { reaction-menu.open-menu(); }
     public function close-preview-menu() { reaction-menu.close-menu(); }
     public function preview-profile-menu() { profile-menu.open-menu(); }
     public function close-profile-menu() { profile-menu.close-menu(); }
     public function preview-routing-help() { routing-help.open-help(); }
     public function close-routing-help() { routing-help.close-help(); }
-    public function scroll-settings-to(offset: float) { settings-scroll.content-y = 0px - offset * 1px; }
-
-
-    FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; spacing: 0px;
-        sidebar-panel := Rectangle { layout-order: Locale.rtl ? 0 : 0;
-            width: root.sidebar-expanded ? 216px : 84px;
-            animate width { duration: 330ms; easing: cubic-bezier(0.2,1.03,0.3,1); }
-            background: @linear-gradient(180deg, #172338ee 0%, #0b1329f5 100%);
-            border-width: 1px; border-color: #40547470; clip: true;
-            VerticalLayout { padding: 16px; spacing: 8px;
-                FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: root.sidebar-expanded ? stretch : center; height: 43px; spacing: root.sidebar-expanded ? 10px : 0px;
-                    
-                    if root.sidebar-expanded: Rectangle { layout-order: Locale.rtl ? -1 : 1; horizontal-stretch: 1; background: transparent; }
-                    Action { layout-order: Locale.rtl ? -2 : 2; text: ""; accessible-label: "Toggle sidebar"; width: 36px; clicked => { root.sidebar-expanded = !root.sidebar-expanded; }
-                        Image { source: (root.sidebar-expanded == Locale.rtl) ? @image-url("../assets/chevron-right.svg") : @image-url("../assets/chevron-left.svg"); width: 20px; height: 20px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
-                    }
-                }
-                if !root.sidebar-expanded: Image { source: @image-url("../assets/sidebar-logo.svg"); width: 52px; height: 52px; image-fit: contain; }
-                if root.sidebar-expanded: VerticalLayout { spacing: 5px;
-                    Text { horizontal-alignment: Locale.rtl ? right : left; text: root.sidebar-brand-text; color: Colors.text; font-size: 20px; font-weight: 800; }
-                    Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Better sound for you" : "صدای بهتر برای تو"; color: Colors.muted; font-size: 10px; }
-                }
-                Rectangle { height: 1px; background: #41567765; }
-                ScrollView { vertical-stretch: 1; horizontal-stretch: 1; VerticalLayout { spacing: 6px; alignment: start;
-                sound-nav := NavAction { order: 0; text: root.english ? "Sound" : "صدا"; icon: @image-url("../assets/nav-sound.svg"); expanded: root.sidebar-expanded; selected: root.page == 0; clicked => { root.page = 0; } }
-                NavAction { order: 2; text: root.english ? "Components" : "افزونه‌ها"; icon: @image-url("../assets/nav-components.svg"); expanded: root.sidebar-expanded; selected: root.page == 1; clicked => { root.page = 1; } }
-                NavAction { order: 3; text: root.log-label; icon: @image-url("../assets/nav-log.svg"); expanded: root.sidebar-expanded; selected: root.page == 2; clicked => { root.page = 2; } }
-                NavAction { order: 4; text: root.english ? "Settings" : "تنظیمات"; icon: @image-url("../assets/nav-settings.svg"); expanded: root.sidebar-expanded; selected: root.page == 4; clicked => { root.page = 4; } }
-                NavAction { order: 5; text: (root.english ? "Audio conflicts" : "تداخل صوتی") + (root.conflicts.length > 0 ? " (" + root.conflicts.length + ")" : ""); icon: @image-url("../assets/nav-conflicts.svg"); expanded: root.sidebar-expanded; selected: root.page == 5; clicked => { root.page = 5; root.refresh-conflicts(); } }
-                NavAction { order: 6; text: root.english ? "About" : "درباره برنامه"; icon: @image-url("../assets/nav-about.svg"); expanded: root.sidebar-expanded; selected: root.page == 6; clicked => { root.page = 6; } }
-                } }
-                if root.cable-warning-visible: Rectangle {
-                    height: root.sidebar-expanded ? 105px : 38px;
-                    background: #503a2233; border-radius: 12px; border-width: 1px; border-color: #d5a16670;
-                    Text { x: 10px; y: 8px; width: parent.width - 20px; height: parent.height - 16px; text: root.sidebar-expanded ? (root.english ? "For better results and full app functionality, install the virtual cable add-on from Components." : "برای نتیجهٔ بهتر و استفادهٔ کامل از قابلیت‌های نرم‌افزار، افزونهٔ کابل مجازی را از بخش افزونه‌ها نصب کنید.") : "⚠"; color: #e5b585; font-size: root.sidebar-expanded ? 11px : 20px; wrap: word-wrap; horizontal-alignment: root.sidebar-expanded ? (Locale.rtl ? right : left) : center; vertical-alignment: center; }
-                    TouchArea { mouse-cursor: pointer; clicked => { root.page = 1; } }
-                }
-                NavAction { text: root.english ? "Donate" : "دونیت"; icon: @image-url("../assets/nav-donate.svg"); expanded: root.sidebar-expanded; clicked => { root.open-link("https://maxispace.dev/donate"); } }
-                NavAction { text: root.english ? "فارسی / FA" : "English / EN"; icon: @image-url("../assets/nav-language.svg"); expanded: root.sidebar-expanded; clicked => { root.english = !root.english; root.config-changed(); } }
-                if root.sidebar-expanded: Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "X keeps Maxi running in the tray." : "ضربدر: ادامهٔ اجرا کنار ساعت"; color: Colors.muted; font-size: 10px; wrap: word-wrap; }
-                NavAction { text: root.english ? "Exit app" : "خروج از برنامه"; icon: @image-url("../assets/nav-exit.svg"); expanded: root.sidebar-expanded; clicked => { root.exit-app(); } }
-                Text { text: root.version-label; color: Colors.muted; font-size: 10px; horizontal-alignment: center; }
-            }
+    out property <bool> scroll-widths-fit: sound-scroll.content-width <= sound-scroll.visible-width + 1px && settings-scroll.content-width <= settings-scroll.visible-width + 1px && components-scroll.content-width <= components-scroll.visible-width + 1px && about-scroll.content-width <= about-scroll.visible-width + 1px;
+    out property <bool> sound-bottom-visible: tuning-card.absolute-position.y + tuning-card.height <= sound-scroll.absolute-position.y + sound-scroll.visible-height + 1px;
+    out property <length> settings-scroll-offset: settings-scroll.content-y;
+    out property <length> sound-scroll-range: max(0px, sound-scroll.content-height - sound-scroll.visible-height);
+    out property <length> settings-scroll-range: max(0px, settings-scroll.content-height - settings-scroll.visible-height);
+    public function scroll-page(fraction: float) {
+        if root.page == 0 { sound-scroll.content-y = -clamp(fraction, 0, 1) * root.sound-scroll-range; }
+        if root.page == 4 { settings-scroll.content-y = -clamp(fraction, 0, 1) * root.settings-scroll-range; }
+        if root.page == 1 { components-scroll.content-y = -clamp(fraction, 0, 1) * max(0px, components-scroll.content-height - components-scroll.visible-height); }
+        if root.page == 6 { about-scroll.content-y = -clamp(fraction, 0, 1) * max(0px, about-scroll.content-height - about-scroll.visible-height); }
+    }
+    public function page-scroll-step(direction: float) {
+        if root.page == 0 { sound-scroll.content-y = clamp(sound-scroll.content-y - direction * sound-scroll.visible-height * 0.8, -root.sound-scroll-range, 0px); }
+        if root.page == 4 { settings-scroll.content-y = clamp(settings-scroll.content-y - direction * settings-scroll.visible-height * 0.8, -root.settings-scroll-range, 0px); }
+        if root.page == 1 { components-scroll.content-y = clamp(components-scroll.content-y - direction * components-scroll.visible-height * 0.8, min(0px, components-scroll.visible-height - components-scroll.content-height), 0px); }
+        if root.page == 6 { about-scroll.content-y = clamp(about-scroll.content-y - direction * about-scroll.visible-height * 0.8, min(0px, about-scroll.visible-height - about-scroll.content-height), 0px); }
+    }
+    public function reveal-control(x: length, y: length, height: length) {
+        if x >= sidebar-panel.absolute-position.x && x < sidebar-panel.absolute-position.x + sidebar-panel.width { sidebar-scroll.content-y = clamp(sidebar-scroll.content-y + min(0px, sidebar-scroll.absolute-position.y + sidebar-scroll.visible-height - y - height - 8px) + max(0px, sidebar-scroll.absolute-position.y + 8px - y), min(0px, sidebar-scroll.visible-height - sidebar-scroll.content-height), 0px); }
+        if root.compact-menu-presented { return; }
+        if x >= body-host.absolute-position.x && x < body-host.absolute-position.x + body-host.width {
+            if root.page == 0 { sound-scroll.content-y = clamp(sound-scroll.content-y + min(0px, sound-scroll.absolute-position.y + sound-scroll.visible-height - y - height - 8px) + max(0px, sound-scroll.absolute-position.y + 8px - y), -root.sound-scroll-range, 0px); }
+            if root.page == 4 { settings-scroll.content-y = clamp(settings-scroll.content-y + min(0px, settings-scroll.absolute-position.y + settings-scroll.visible-height - y - height - 8px) + max(0px, settings-scroll.absolute-position.y + 8px - y), -root.settings-scroll-range, 0px); }
+            if root.page == 1 { components-scroll.content-y = clamp(components-scroll.content-y + min(0px, components-scroll.absolute-position.y + components-scroll.visible-height - y - height - 8px) + max(0px, components-scroll.absolute-position.y + 8px - y), min(0px, components-scroll.visible-height - components-scroll.content-height), 0px); }
+            if root.page == 6 { about-scroll.content-y = clamp(about-scroll.content-y + min(0px, about-scroll.absolute-position.y + about-scroll.visible-height - y - height - 8px) + max(0px, about-scroll.absolute-position.y + 8px - y), min(0px, about-scroll.visible-height - about-scroll.content-height), 0px); }
         }
-        body-host := Rectangle { layout-order: Locale.rtl ? -1 : 1; horizontal-stretch: 1; clip: true;
+    }
+    public function scroll-settings-to(offset: float) { settings-scroll.content-y = 0px - offset * 1px; }
+    public function scroll-sidebar-to-end() { sidebar-scroll.content-y = min(0px, sidebar-scroll.visible-height - sidebar-scroll.content-height); }
+    out property <bool> sidebar-footer-visible: donate-nav.absolute-position.y >= sidebar-scroll.absolute-position.y && exit-nav.absolute-position.y + exit-nav.height <= sidebar-scroll.absolute-position.y + sidebar-scroll.visible-height;
+
+
+    input-scope := FocusScope {
+        focus-on-tab-navigation: false;
+        capture-key-pressed(event) => {
+            if root.pending-conflict >= 0 {
+                if event.text == Key.Escape { root.pending-conflict = -1; return accept; }
+                if event.text == Key.Tab || event.text == Key.Backtab { if confirmation-cancel.has-keyboard-focus { confirmation-end.focus(); } else { confirmation-cancel.focus(); } return accept; }
+            }
+            if root.compact-menu-presented {
+                if event.text == Key.Escape { root.close-sidebar-menu(); return accept; }
+                if !root.compact-menu-open { if event.text == Key.Return || event.text == " " { root.toggle-sidebar(); } return accept; }
+                if event.text == Key.Tab || event.text == Key.Backtab { root.focus-sidebar-item(mod(root.sidebar-focus-index + (event.modifiers.shift || event.text == Key.Backtab ? 9 : 1), 10)); return accept; }
+            }
+            return reject;
+        }
+    FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; spacing: 0px;
+        sidebar-slot := Rectangle { width: root.sidebar-open ? 216px : 84px; animate width { duration: 330ms; easing: cubic-bezier(0.2,1.03,0.3,1); } }
+        body-host := Rectangle { changed width => { root.stacked = self.width < 820px; } layout-order: Locale.rtl ? -1 : 1; horizontal-stretch: 1; clip: true; forward-focus: page-focus;
+        page-focus := FocusScope {
+            key-pressed(event) => { if event.text == Key.PageDown { root.page-scroll-step(1); return accept; } if event.text == Key.PageUp { root.page-scroll-step(-1); return accept; } return reject; }
             Rectangle { x: 0px; y: 0px; width: parent.width; height: parent.height; background: @linear-gradient(125deg, #090e2200 0%, #16abbf10 45%, #090e2200 100%); }
         PageSurface { width: parent.width; height: parent.height; active: root.page == 0;
         VerticalLayout { padding: 23px; spacing: 14px;
-            control-strip := Rectangle { height: 82px; border-radius: 23px; background: Colors.panel; border-width: 1px; border-color: #41567780;
-                FlexboxLayout { padding: 12px; flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; spacing: 8px;
-                    playback-device-field := VerticalLayout { layout-order: 0; width: root.mode == 1 ? max(120px, (parent.width - 356px) * 4 / 13) : max(120px, (parent.width - 348px) * 4 / 9); spacing: 5px;
+            control-strip := Rectangle { height: root.stacked ? 142px : 82px; vertical-stretch: 0; border-radius: 23px; background: Colors.panel; border-width: 1px; border-color: #41567780;
+                FlexboxLayout { padding: 12px; flex-direction: FlexboxLayoutDirection.row; flex-wrap: root.stacked ? wrap : no-wrap; alignment: stretch; spacing: 8px;
+                    playback-device-field := VerticalLayout { layout-order: 0; height: 54px; width: root.stacked ? (parent.width - 32px) / 2 : root.mode == 1 ? max(120px, (parent.width - 356px) * 4 / 13) : max(120px, (parent.width - 348px) * 4 / 9); spacing: 5px;
                         Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "PLAYBACK DEVICE" : "دستگاه پخش"; color: Colors.muted; font-size: 10px; }
-                        ComboBox { min-width: 104px; model: root.outputs; current-index <=> root.output-index; enabled: root.devices-ready && root.recovery-ready && !root.running && !root.busy; selected(value) => { root.config-changed(); } }
+                        ComboBox { reveal-on-focus: false; min-width: 104px; model: root.outputs; current-index <=> root.output-index; enabled: root.devices-ready && root.recovery-ready && !root.running && !root.busy; selected(value) => { root.config-changed(); } }
                     }
-                    processing-mode-field := VerticalLayout { layout-order: Locale.rtl ? -1 : 1; width: root.mode == 1 ? max(150px, (parent.width - 356px) * 5 / 13) : max(150px, (parent.width - 348px) * 5 / 9); spacing: 5px;
+                    processing-mode-field := VerticalLayout { layout-order: root.stacked ? 1 : (Locale.rtl ? -1 : 1); height: 54px; width: root.stacked ? (parent.width - 32px) / 2 : root.mode == 1 ? max(150px, (parent.width - 356px) * 5 / 13) : max(150px, (parent.width - 348px) * 5 / 9); spacing: 5px;
                         Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "PROCESSING MODE" : "حالت پردازش"; color: Colors.muted; font-size: 10px; }
-                        ComboBox { min-width: 130px; model: root.english ? ["Windows volume", "Full boost / virtual cable"] : ["صدای ویندوز", "بوست کامل / کابل مجازی"]; current-index <=> root.mode; enabled: root.devices-ready && root.recovery-ready && !root.running && !root.busy; selected(value) => { root.config-changed(); } }
+                        ComboBox { reveal-on-focus: false; min-width: 130px; model: root.english ? ["Windows volume", "Full boost / virtual cable"] : ["صدای ویندوز", "بوست کامل / کابل مجازی"]; current-index <=> root.mode; enabled: root.devices-ready && root.recovery-ready && !root.running && !root.busy; selected(value) => { root.config-changed(); } }
                     }
-                    if root.mode == 1: virtual-input-field := VerticalLayout { layout-order: Locale.rtl ? -2 : 2; width: max(120px, (parent.width - 356px) * 4 / 13); spacing: 5px;
+                    if root.mode == 1: virtual-input-field := VerticalLayout { layout-order: root.stacked ? 2 : (Locale.rtl ? -2 : 2); height: 54px; width: root.stacked ? max(150px, parent.width - 340px) : max(120px, (parent.width - 356px) * 4 / 13); spacing: 5px;
                         Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "VIRTUAL INPUT" : "ورودی مجازی"; color: Colors.muted; font-size: 10px; }
-                        ComboBox { min-width: 120px; model: root.sources; current-index <=> root.source-index; enabled: root.devices-ready && root.recovery-ready && !root.running && !root.busy; selected(value) => { root.config-changed(); } }
+                        ComboBox { reveal-on-focus: false; min-width: 120px; model: root.sources; current-index <=> root.source-index; enabled: root.devices-ready && root.recovery-ready && !root.running && !root.busy; selected(value) => { root.config-changed(); } }
                     }
-                    playback-control-field := VerticalLayout { layout-order: Locale.rtl ? -3 : 3; width: 268px; spacing: 5px;
+                    playback-control-field := VerticalLayout { layout-order: root.stacked ? 3 : (Locale.rtl ? -3 : 3); height: 54px; width: 268px; spacing: 5px;
                         Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "PLAYBACK CONTROL" : "کنترل پخش"; color: Colors.muted; font-size: 10px; }
                         FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; spacing: 4px;
-                            Action { layout-order: 0; width: 50px; text: root.english ? "Run" : "اجرا"; primary: true; enabled: root.devices-ready && root.recovery-ready && !root.running && !root.busy && !root.components-busy; clicked => { root.toggle-audio(); } }
-                            Action { layout-order: Locale.rtl ? -1 : 1; width: 50px; text: root.english ? "Stop" : "توقف"; enabled: root.running && !root.busy; clicked => { root.toggle-audio(); } }
-                            Action { layout-order: Locale.rtl ? -2 : 2; width: 58px; text: root.paused ? (root.english ? "Resume" : "ادامه") : (root.english ? "Pause" : "مکث"); enabled: root.running && !root.busy; clicked => { root.toggle-pause(); } }
-                            Rectangle { layout-order: Locale.rtl ? -3 : 3; width: 98px; border-radius: 13px; border-width: 1px; border-color: #345571; background: #0c1b32;
+                            Action { reveal-on-focus: false; layout-order: 0; width: 50px; text: root.english ? "Run" : "اجرا"; primary: true; enabled: root.devices-ready && root.recovery-ready && !root.running && !root.busy && !root.components-busy; clicked => { root.toggle-audio(); } }
+                            Action { reveal-on-focus: false; layout-order: root.stacked ? 1 : (Locale.rtl ? -1 : 1); width: 50px; text: root.english ? "Stop" : "توقف"; enabled: root.running && !root.busy; clicked => { root.toggle-audio(); } }
+                            Action { reveal-on-focus: false; layout-order: root.stacked ? 2 : (Locale.rtl ? -2 : 2); width: 58px; text: root.paused ? (root.english ? "Resume" : "ادامه") : (root.english ? "Pause" : "مکث"); enabled: root.running && !root.busy; clicked => { root.toggle-pause(); } }
+                            Rectangle { layout-order: root.stacked ? 3 : (Locale.rtl ? -3 : 3); width: 98px; border-radius: 13px; border-width: 1px; border-color: #345571; background: #0c1b32;
                                 Text { width: parent.width; height: parent.height; text: root.running && !root.paused ? (root.english ? "● Active" : "● فعال") : (root.english ? "○ Standby" : "○ آماده‌به‌کار"); color: root.running && !root.paused ? #77e1df : Colors.muted; horizontal-alignment: center; vertical-alignment: center; font-size: 10px; }
                             }
                         }
                     }
-                    refresh-field := VerticalLayout { layout-order: Locale.rtl ? -4 : 4; width: 32px; spacing: 5px;
+                    refresh-field := VerticalLayout { layout-order: root.stacked ? 4 : (Locale.rtl ? -4 : 4); height: 54px; width: 32px; spacing: 5px;
                         Rectangle { height: 14px; background: transparent; }
-                        Action { width: 32px; text: ""; accessible-label: root.english ? "Refresh devices" : "به‌روزرسانی دستگاه‌ها"; enabled: !root.running && !root.busy; clicked => { root.refresh-devices(); }
+                        Action { reveal-on-focus: false; width: 32px; text: ""; accessible-label: root.english ? "Refresh devices" : "به‌روزرسانی دستگاه‌ها"; enabled: !root.running && !root.busy; clicked => { root.refresh-devices(); }
                             Image { source: @image-url("../assets/refresh.svg"); width: 17px; height: 17px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
                         }
                     }
                 }
             }
-            FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; spacing: 16px;
-                VerticalLayout { layout-order: Locale.rtl ? 0 : 0; width: 260px; spacing: 14px;
+            sound-scroll := ScrollView { vertical-stretch: 1; content-width: self.visible-width;
+            sound-cards := FlexboxLayout { width: sound-scroll.visible-width; flex-direction: root.stacked ? FlexboxLayoutDirection.column : FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; spacing: 16px;
+                min-height: root.stacked ? 618px + (root.profile == 7 ? 552px : 362px) + 16px : 575px;
+                VerticalLayout { min-height: 618px; layout-order: Locale.rtl ? 0 : 0; width: root.stacked ? sound-scroll.visible-width : 260px; spacing: 14px;
                     target-card := Rectangle { height: 304px; border-radius: 24px; background: Colors.panel; border-width: 1px; border-color: #41567780;
                         VerticalLayout { padding: 16px; spacing: 4px;
                             Text { text: root.leveling ? (root.english ? "SOUND TARGET" : "بلندی صدای هدف") : (root.english ? "MANUAL VOLUME / BOOST" : "ولوم / بوست دستی"); color: Colors.muted; font-size: 11px; horizontal-alignment: center; }
@@ -651,19 +776,19 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
-                    enhancement-card := Rectangle { vertical-stretch: 1; min-height: 257px; border-radius: 24px; background: Colors.panel; border-width: 1px; border-color: #41567780;
+                    enhancement-card := Rectangle { vertical-stretch: 1; min-height: 300px; border-radius: 24px; background: Colors.panel; border-width: 1px; border-color: #41567780;
                         VerticalLayout { padding: 12px; spacing: 3px; alignment: start;
                             Toggle { text: root.english ? "Steady loudness" : "ثابت ماندن بلندی"; checked <=> root.leveling; toggled => { root.config-changed(); } }
                             Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "STEADYING INTENSITY" : "شدت ثابت‌سازی"; color: Colors.muted; font-size: 10px; }
                             ComboBox { model: root.english ? ["High", "Balanced", "Low"] : ["زیاد", "متعادل", "کم"]; current-index <=> root.intensity; enabled: root.leveling; selected(value) => { root.config-changed(); } }
                             Rectangle { height: 1px; background: Colors.border; }
-                            Toggle { text: root.english ? "Sound enhancement" : "بهبود کیفیت صدا"; checked: root.profile != 0; toggled => { root.set-enhancement(self.checked); } }
+                            enhancement-toggle := Toggle { text: root.english ? "Sound enhancement" : "بهبود کیفیت صدا"; checked: root.enhancement-checked-effective; enabled: root.enhancement-available; toggled => { root.set-enhancement(self.checked); } }
                             Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "AUDIO PROFILE" : "پروفایل صوتی"; color: Colors.muted; font-size: 10px; }
-                            profile-menu := ComboBox { model: root.profile-names; current-index <=> root.profile; selected(value) => { root.choose-profile(root.profile); } }
-                            Text { height: 14px; horizontal-alignment: Locale.rtl ? right : left; text: root.profile == 0 ? (root.english ? "System tone · enhancement off" : "رنگ صدای سیستم؛ بهبوددهنده خاموش") : root.enhancement-hint-visible ? (root.english ? "Requires Full boost / virtual cable mode." : "نیازمند حالت بوست کامل / کابل مجازی") : (root.english ? ["", "Natural tone.", "Clearer dialogue with less boom.", "Gentle warmth for music.", "Fuller lows and clearer dialogue.", "Relaxed treble for longer listening.", "Clearer cues with lighter bass.", "Your independent 10-band equalizer."][root.profile] : ["", "رنگ طبیعی صدا.", "گفتار روشن‌تر با بم کمتر.", "گرمای ملایم برای موسیقی.", "بم پرتر و دیالوگ واضح‌تر.", "صدای زیر آرام‌تر برای شنیدن طولانی.", "نشانه‌های روشن‌تر با بم کمتر.", "اکولایزر مستقل ۱۰ باندی شما."][root.profile]); color: root.enhancement-hint-visible ? #e5b585 : Colors.muted; font-size: 10px; overflow: elide; }
+                            profile-menu := ComboBox { model: root.profile-names; current-index: root.profile; enabled: root.enhancement-available; selected(value) => { root.choose-profile(profile-menu.current-index); } }
+                            Text { height: root.enhancement-hint-visible ? 30px : 14px; horizontal-alignment: Locale.rtl ? right : left; text: root.enhancement-hint-visible ? root.processing-mode-warning : root.profile == 0 ? (root.english ? "System tone · enhancement off" : "رنگ صدای سیستم؛ بهبوددهنده خاموش") : (root.english ? ["", "Natural tone.", "Clearer dialogue with less boom.", "Gentle warmth for music.", "Fuller lows and clearer dialogue.", "Relaxed treble for longer listening.", "Clearer cues with lighter bass.", "Your independent 10-band equalizer."][root.profile] : ["", "رنگ طبیعی صدا.", "گفتار روشن‌تر با بم کمتر.", "گرمای ملایم برای موسیقی.", "بم پرتر و دیالوگ واضح‌تر.", "صدای زیر آرام‌تر برای شنیدن طولانی.", "نشانه‌های روشن‌تر با بم کمتر.", "اکولایزر مستقل ۱۰ باندی شما."][root.profile]); color: root.enhancement-hint-visible ? #e5b585 : Colors.muted; font-size: 10px; wrap: word-wrap; }
                             Rectangle { height: 1px; background: Colors.border; }
-                            Toggle { min-height: 30px; preferred-height: 30px; text: root.english ? "Treble smoothing" : "نرم‌سازی صدای تیز"; checked <=> root.treble-smoothing; enabled: root.profile != 0; toggled => { root.config-changed(); } }
-                            Text { height: 13px; horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Dynamic reduction only when harsh treble dominates" : "کاهش پویا فقط هنگام غالب‌شدن صدای تیز"; color: Colors.muted; font-size: 9px; overflow: elide; }
+                            treble-toggle := Toggle { min-height: 30px; preferred-height: 30px; text: root.english ? "Treble smoothing" : "نرم‌سازی صدای تیز"; checked: root.treble-checked-effective; enabled: root.treble-available; toggled => { root.request-treble-smoothing(self.checked); } }
+                            Text { height: root.mode == 0 ? 30px : 13px; horizontal-alignment: Locale.rtl ? right : left; text: root.mode == 0 ? root.processing-mode-warning : (root.english ? "Dynamic reduction only when harsh treble dominates" : "کاهش پویا فقط هنگام غالب‌شدن صدای تیز"); color: root.mode == 0 ? #e5b585 : Colors.muted; font-size: 9px; wrap: word-wrap; }
                             treble-meter := Rectangle { height: 18px; background: transparent;
                                 property <float> active-level: root.mode == 1 && root.profile != 0 && root.treble-smoothing ? clamp(root.deess-level, 0, 1) : 0;
                                 Text { x: Locale.rtl ? 0px : parent.width - 58px; width: 58px; height: parent.height; text: root.mode == 1 && root.profile != 0 && root.treble-smoothing ? root.deess-text : "−0.0 dB"; color: #81dfe3; font-size: 9px; horizontal-alignment: Locale.rtl ? left : right; vertical-alignment: center; }
@@ -675,7 +800,7 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-                VerticalLayout { layout-order: Locale.rtl ? -1 : 1; horizontal-stretch: 1; spacing: 12px;
+                VerticalLayout { min-height: root.profile == 7 ? 552px : 362px; layout-order: root.stacked ? 1 : (Locale.rtl ? -1 : 1); horizontal-stretch: 1; spacing: 12px;
                     Rectangle {
                         vertical-stretch: 1; min-height: 148px; border-radius: 24px; background: Colors.panel; border-width: 1px; border-color: #41567780;
                         VerticalLayout {
@@ -694,11 +819,14 @@ export component AppWindow inherits Window {
                                 Path { x: 0px; y: 0px; width: graph.width; height: graph.height; viewbox-width: root.graph-width; viewbox-height: root.graph-height; fit: fill; commands: root.input-path; fill: @linear-gradient(90deg, #548df192 0%, #467cda04 100%); stroke: #609eed; stroke-width: 2px; }
                                 Path { x: 0px; y: 0px; width: graph.width; height: graph.height; viewbox-width: root.graph-width; viewbox-height: root.graph-height; fit: fill; commands: root.output-path; fill: @linear-gradient(90deg, #26d5d8a0 0%, #21b9cf05 100%); stroke: #58e8e8; stroke-width: 2px; }
                             }
-                            FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; Text { layout-order: Locale.rtl ? 0 : 0; horizontal-stretch: 1; horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "12 seconds" : "۱۲ ثانیه"; color: #8399b8; font-size: 10px; } Text { layout-order: Locale.rtl ? -1 : 1; horizontal-stretch: 1; text: ""; color: root.running ? Colors.accent : Colors.muted; font-size: 10px; horizontal-alignment: Locale.rtl ? left : right; } }
+                            FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch;
+                                Text { layout-order: Locale.rtl ? 0 : 0; horizontal-stretch: 1; horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "12 seconds" : "۱۲ ثانیه"; color: #8399b8; font-size: 10px; }
+                                Text { layout-order: Locale.rtl ? -1 : 1; horizontal-stretch: 3; visible: root.running; text: root.measurement-source == 1 ? (root.english ? "Measured from audio samples" : "اندازه‌گیری از نمونه‌های صدا") : root.measurement-source == 2 ? (root.english ? "Estimated from peak level" : "اندازه‌گیری تقریبی از قلهٔ صدا") : (root.english ? "Measurement data unavailable" : "دادهٔ اندازه‌گیری در دسترس نیست"); color: root.measurement-source == 2 ? #e5b585 : Colors.muted; font-size: 9px; wrap: word-wrap; horizontal-alignment: Locale.rtl ? left : right; }
+                            }
                         }
                     }
 
-                    Rectangle { height: root.profile == 7 ? 190px : 0px; vertical-stretch: 0; clip: true; opacity: root.profile == 7 ? 1 : 0; visible: self.opacity > 0.001; animate height, opacity { duration: 220ms; easing: cubic-bezier(0.16,1,0.3,1); } border-radius: 24px; background: Colors.panel; border-width: 1px; border-color: #41567780;
+                    equalizer-card := Rectangle { height: root.profile == 7 ? 190px : 0px; vertical-stretch: 0; clip: true; opacity: root.profile == 7 ? 1 : 0; visible: self.opacity > 0.001; animate height, opacity { duration: 220ms; easing: cubic-bezier(0.16,1,0.3,1); } border-radius: 24px; background: Colors.panel; border-width: 1px; border-color: #41567780;
                         VerticalLayout { padding: 15px; spacing: 8px;
                             FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch;
                                 Text { layout-order: Locale.rtl ? 0 : 0; horizontal-stretch: 1; horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "CUSTOM EQUALIZER · dB" : "اکولایزر سفارشی · dB"; color: Colors.text; font-size: 11px; font-weight: 700; }
@@ -740,6 +868,7 @@ export component AppWindow inherits Window {
                 }
             }
         }
+        }
         if root.volume-notice != "" || root.audio-error != "": Rectangle { x: 23px; y: parent.height - self.height - 23px; width: parent.width - 46px; height: 70px; border-radius: 18px; background: #112743f5; border-width: 1px; border-color: #73cddb; drop-shadow-color: #00000070; drop-shadow-blur: 18px;
             FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; padding: 14px; spacing: 12px;
                 Text { layout-order: Locale.rtl ? 0 : 0; horizontal-stretch: 1; horizontal-alignment: Locale.rtl ? right : left; text: root.audio-error != "" ? root.audio-error : root.volume-notice; color: root.audio-error != "" ? #ffc1a1 : #c2eefa; wrap: word-wrap; vertical-alignment: center; font-size: 12px; }
@@ -748,49 +877,53 @@ export component AppWindow inherits Window {
         }
         }
 
-        PageSurface { width: parent.width; height: parent.height; active: root.page == 1; VerticalLayout {
+        PageSurface { width: parent.width; height: parent.height; active: root.page == 1; components-scroll := ScrollView { content-width: self.visible-width; VerticalLayout { min-width: 0px; width: components-scroll.visible-width; alignment: start;
             padding: 28px; spacing: 19px;
-            FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch;
-                VerticalLayout { layout-order: Locale.rtl ? 0 : 0; horizontal-stretch: 1; spacing: 6px;
+            FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: root.component-header-stacked ? wrap : no-wrap; alignment: stretch; spacing: root.component-header-stacked ? 10px : 8px;
+                components-heading := VerticalLayout { layout-order: Locale.rtl ? 0 : 0; horizontal-stretch: 1; spacing: 6px;
                     Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Audio components" : "افزونه‌ها و ابزارهای صوتی"; color: Colors.text; font-size: 24px; font-weight: 750; }
-                    Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Install or update what full audio processing needs." : "وابستگی مورد نیاز بوست کامل را از همین‌جا نصب یا آپدیت کن."; color: Colors.muted; }
+                    Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Install or update what full audio processing needs." : "وابستگی مورد نیاز بوست کامل را از همین‌جا نصب یا آپدیت کن."; color: Colors.muted; wrap: word-wrap; }
                 }
-                Action { layout-order: Locale.rtl ? -1 : 1; text: root.english ? "Check for updates" : "بررسی آپدیت"; width: 165px; enabled: !root.components-busy; clicked => { root.check-updates(); } }
+                updates-slot := Rectangle { layout-order: root.component-header-stacked ? 1 : (Locale.rtl ? -1 : 1); height: 36px; vertical-stretch: 0; width: root.component-header-stacked ? components-scroll.visible-width - 56px : 165px; updates-action := Action { x: Locale.rtl ? parent.width - self.width : 0px; width: 165px; text: root.english ? "Check for updates" : "بررسی آپدیت"; enabled: !root.components-busy; clicked => { root.check-updates(); } } }
             }
-            Rectangle { min-height: 198px; background: Colors.panel; border-width: 1px; border-color: #41567780; border-radius: 25px;
+            Rectangle { min-height: root.stacked ? 340px : 198px; background: Colors.panel; border-width: 1px; border-color: #41567780; border-radius: 25px;
                 VerticalLayout { padding: 23px; spacing: 15px;
-                    FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch;
-                        VerticalLayout { layout-order: Locale.rtl ? 0 : 0; horizontal-stretch: 1; spacing: 7px; Text { horizontal-alignment: Locale.rtl ? right : left; text: "VB-CABLE"; color: Colors.text; font-size: 21px; font-weight: 750; } Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Virtual audio driver · required for full boost" : "درایور صوتی مجازی · مورد نیاز بوست کامل"; color: Colors.muted; } }
+                    FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: root.stacked ? wrap : no-wrap; alignment: stretch;
+                        VerticalLayout { layout-order: Locale.rtl ? 0 : 0; horizontal-stretch: 1; spacing: 7px; Text { horizontal-alignment: Locale.rtl ? right : left; text: "VB-CABLE"; color: Colors.text; font-size: 21px; font-weight: 750; } Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Virtual audio driver · required for full boost" : "درایور صوتی مجازی · مورد نیاز بوست کامل"; color: Colors.muted; wrap: word-wrap; } }
                         Text { layout-order: Locale.rtl ? -1 : 1; horizontal-stretch: 1; text: root.cable-installed ? "● INSTALLED" : "○ NOT INSTALLED"; color: root.cable-installed ? #78d5a6 : #ffb074; horizontal-alignment: Locale.rtl ? left : right; vertical-alignment: center; font-size: 11px; }
                     }
                     Text { horizontal-alignment: Locale.rtl ? right : left; text: root.component-status; color: Colors.muted; wrap: word-wrap; }
-                    FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; Text { layout-order: Locale.rtl ? 0 : 0; horizontal-stretch: 1; horizontal-alignment: Locale.rtl ? right : left; text: root.installed-version; color: #c6d6ed; font-size: 11px; } Text { layout-order: Locale.rtl ? -1 : 1; horizontal-stretch: 1; text: root.latest-version; color: #c6d6ed; font-size: 11px; horizontal-alignment: Locale.rtl ? left : right; } }
-                    FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch;
+                    FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: root.stacked ? wrap : no-wrap; alignment: stretch; Text { layout-order: Locale.rtl ? 0 : 0; horizontal-stretch: 1; horizontal-alignment: Locale.rtl ? right : left; text: root.installed-version; color: #c6d6ed; font-size: 11px; } Text { layout-order: Locale.rtl ? -1 : 1; horizontal-stretch: 1; text: root.latest-version; color: #c6d6ed; font-size: 11px; horizontal-alignment: Locale.rtl ? left : right; } }
+                    FlexboxLayout { height: root.stacked ? 142px : 48px; flex-direction: root.stacked ? FlexboxLayoutDirection.column : FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch;
                         spacing: 12px;
-                        Action { layout-order: Locale.rtl ? 0 : 0; text: root.components-busy ? (root.english ? "Please wait…" : "کمی صبر کن…") : root.cable-installed ? (root.english ? "Update / repair components" : "آپدیت / ترمیم وابستگی‌ها") : (root.english ? "Install required components" : "نصب وابستگی‌های لازم"); primary: true; width: 247px; enabled: !root.components-busy && !root.running && !root.busy; clicked => { root.install-components(); } }
-                        Action { layout-order: Locale.rtl ? -1 : 1; text: root.english ? "Official website" : "وب‌سایت رسمی"; width: 137px; clicked => { root.open-link("https://vb-audio.com/Cable/"); } }
-                        Text { layout-order: Locale.rtl ? -2 : 2; horizontal-stretch: 1; horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Windows may request administrator access and a restart." : "ویندوز ممکن است دسترسی مدیر و راه‌اندازی مجدد بخواهد."; color: Colors.muted; wrap: word-wrap; font-size: 11px; vertical-alignment: center; }
+                        install-slot := Rectangle { layout-order: 0; height: 36px; vertical-stretch: 0; width: root.stacked ? components-scroll.visible-width - 102px : 247px; install-action := Action { x: (parent.width - self.width)/2; text: root.components-busy ? (root.english ? "Please wait…" : "کمی صبر کن…") : root.cable-installed ? (root.english ? "Update / repair components" : "آپدیت / ترمیم وابستگی‌ها") : (root.english ? "Install required components" : "نصب وابستگی‌های لازم"); primary: true; width: 247px; enabled: !root.components-busy && !root.running && !root.busy; clicked => { root.install-components(); } } }
+                        website-slot := Rectangle { layout-order: root.stacked ? 1 : (Locale.rtl ? -1 : 1); height: 36px; vertical-stretch: 0; width: root.stacked ? components-scroll.visible-width - 102px : 137px; website-action := Action { x: (parent.width - self.width)/2; text: root.english ? "Official website" : "وب‌سایت رسمی"; width: 137px; clicked => { root.open-link("https://vb-audio.com/Cable/"); } } }
+                        Text { layout-order: root.stacked ? 2 : (Locale.rtl ? -2 : 2); horizontal-stretch: 1; horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Windows may request administrator access and a restart." : "ویندوز ممکن است دسترسی مدیر و راه‌اندازی مجدد بخواهد."; color: Colors.muted; wrap: word-wrap; font-size: 11px; vertical-alignment: center; }
                     }
                 }
             }
-            if root.components-busy || root.component-message != "": Rectangle {
+            HorizontalLayout { padding-left: 28px; padding-right: 28px; spacing: 12px;
+                Action { layout-order: Locale.rtl ? 1 : 0; width: 150px; text: root.english ? "Download again" : "دانلود مجدد"; enabled: !root.components-busy && !root.running && !root.busy; clicked => { root.download-components-again(); } }
+                Text { layout-order: Locale.rtl ? 0 : 1; horizontal-stretch: 1; horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Install / repair uses a verified saved package. Download again saves a fresh package without opening setup." : "نصب / ترمیم از فایل قبلیِ معتبر استفاده می‌کند. دانلود مجدد، بستهٔ تازه را بدون بازکردن نصاب ذخیره می‌کند."; color: Colors.muted; wrap: word-wrap; font-size: 11px; vertical-alignment: center; }
+            }
+            if root.components-busy || root.component-display-message != "": Rectangle {
                 min-height: 87px; background: #122242; border-radius: 22px;
-                VerticalLayout { padding: 17px; spacing: 12px; Text { horizontal-alignment: Locale.rtl ? right : left; text: root.component-message; color: Colors.text; wrap: word-wrap; font-size: 12px; }
-                    Rectangle { height: 5px; background: Colors.border; border-radius: 3px; Rectangle { width: parent.width * clamp(root.download-progress, 0, 1); background: Colors.accent; border-radius: 3px; } }
+                VerticalLayout { padding: 17px; spacing: 12px; Text { horizontal-alignment: Locale.rtl ? right : left; text: root.component-display-message; color: Colors.text; wrap: word-wrap; font-size: 12px; }
+                    if root.component-progress-visible: Rectangle { height: 5px; background: Colors.border; border-radius: 3px; Rectangle { width: parent.width * clamp(root.download-progress, 0, 1); background: Colors.accent; border-radius: 3px; } }
                 }
             }
-            Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "The button downloads the current official driver package, opens its installer and checks the audio devices afterwards. Start full boost after Windows has made the new device available." : "دکمه، بستهٔ فعلی سازنده را دانلود و نصب‌کننده را اجرا می‌کند و بعد دستگاه‌ها را دوباره بررسی می‌کند. پس از در دسترس قرار گرفتن کابل، حالت بوست کامل را شروع کن."; color: Colors.muted; wrap: word-wrap; font-size: 12px; }
+            Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Install / repair opens the official installer using the saved package, or downloads it if no valid package is available. Audio devices are checked afterwards." : "نصب / ترمیم، نصاب رسمی را با فایل قبلی باز می‌کند؛ اگر فایل معتبری موجود نباشد، بسته را دانلود می‌کند. پس از پایان، دستگاه‌های صدا دوباره بررسی می‌شوند."; color: Colors.muted; wrap: word-wrap; font-size: 12px; }
             Rectangle { vertical-stretch: 1; background: transparent; }
-        } }
+        } } }
 
         PageSurface { width: parent.width; height: parent.height; active: root.page == 2; VerticalLayout {
             padding: 26px; spacing: 17px;
-            FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; spacing: 18px;
-                VerticalLayout { layout-order: Locale.rtl ? 0 : 0; horizontal-stretch: 1; spacing: 5px; Text { horizontal-alignment: Locale.rtl ? right : left; text: "Activity log"; color: Colors.text; font-size: 24px; font-weight: 750; } Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Audio events, installation progress and errors." : "رویدادهای صدا، مراحل نصب و خطاها"; color: Colors.muted; } }
-                Rectangle { layout-order: Locale.rtl ? -1 : 1; width: 368px; height: 36px; vertical-stretch: 0; background: transparent;
+            FlexboxLayout { width: body-host.width - 52px; flex-direction: root.log-header-stacked ? FlexboxLayoutDirection.column : FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; spacing: 18px; vertical-stretch: 0;
+                log-heading := VerticalLayout { layout-order: 0; width: root.log-header-stacked ? body-host.width - 52px : body-host.width - 438px; horizontal-stretch: 0; vertical-stretch: 0; spacing: 5px; Text { horizontal-alignment: Locale.rtl ? right : left; text: "Activity log"; color: Colors.text; font-size: 24px; font-weight: 750; } Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Audio events, installation progress and errors." : "رویدادهای صدا، مراحل نصب و خطاها"; color: Colors.muted; wrap: word-wrap; } }
+                log-actions := Rectangle { layout-order: root.log-header-stacked ? 1 : (Locale.rtl ? -1 : 1); width: 368px; height: 36px; vertical-stretch: 0; background: transparent;
                     FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; spacing: 8px;
                         Toggle { layout-order: Locale.rtl ? 2 : 0; compact: true; width: 95px; text: "Debug"; checked <=> root.debug-log; toggled => { root.config-changed(); } }
-                        Action { layout-order: 1; width: 128px; text: root.english ? "Open log file" : "باز کردن لاگ"; clicked => { root.open-log-file(); } }
+                        log-file-action := Action { layout-order: 1; width: 128px; text: root.english ? "Open log file" : "باز کردن لاگ"; clicked => { root.open-log-file(); } }
                         Action { layout-order: Locale.rtl ? 0 : 2; width: 129px; text: root.english ? "Log folder" : "پوشهٔ لاگ"; clicked => { root.open-log-folder(); } }
                     }
                 }
@@ -798,7 +931,7 @@ export component AppWindow inherits Window {
             Rectangle {
                 border-radius: 24px; background: #09132b; border-width: 1px; border-color: Colors.border;
                 VerticalLayout { spacing: 0px;
-                    Rectangle { height: 38px; background: Colors.raised; FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; padding-left: 14px; padding-right: 14px; Text { layout-order: Locale.rtl ? 0 : 0; horizontal-alignment: Locale.rtl ? right : left; text: "TIME"; width: 90px; color: Colors.muted; font-size: 10px; } Text { layout-order: Locale.rtl ? -1 : 1; horizontal-alignment: Locale.rtl ? right : left; text: "LEVEL"; width: 58px; color: Colors.muted; font-size: 10px; } Text { layout-order: Locale.rtl ? -2 : 2; horizontal-stretch: 1; horizontal-alignment: Locale.rtl ? right : left; text: "EVENT"; color: Colors.muted; font-size: 10px; } } }
+                    Rectangle { height: 38px; border-top-left-radius: 24px; border-top-right-radius: 24px; background: Colors.raised; FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; padding-left: 14px; padding-right: 14px; Text { layout-order: Locale.rtl ? 0 : 0; horizontal-alignment: Locale.rtl ? right : left; vertical-alignment: center; height: 38px; text: "TIME"; width: 90px; color: Colors.muted; font-size: 10px; } Text { layout-order: Locale.rtl ? -1 : 1; horizontal-alignment: Locale.rtl ? right : left; vertical-alignment: center; height: 38px; text: "LEVEL"; width: 58px; color: Colors.muted; font-size: 10px; } Text { layout-order: Locale.rtl ? -2 : 2; horizontal-stretch: 1; horizontal-alignment: Locale.rtl ? right : left; vertical-alignment: center; height: 38px; text: "EVENT"; color: Colors.muted; font-size: 10px; } } }
                     ScrollView {
                         VerticalLayout { padding: 9px; spacing: 3px; alignment: start;
                             for row in root.logs: Rectangle {
@@ -821,9 +954,9 @@ export component AppWindow inherits Window {
 
 
         PageSurface { width: parent.width; height: parent.height; active: root.page == 4;
-            settings-scroll := ScrollView { VerticalLayout { padding: 28px; spacing: 16px; alignment: start;
+            settings-scroll := ScrollView { content-width: self.visible-width; VerticalLayout { padding: 28px; spacing: 16px; alignment: start;
                 Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Settings" : "تنظیمات"; color: Colors.text; font-size: 28px; font-weight: 800; }
-                Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Set your default volume, startup behavior, keyboard shortcuts, and interface language." : "ولوم پیش‌فرض، رفتار استارت‌آپ، کلیدهای میانبر و زبان رابط را تنظیم کن."; color: Colors.muted; wrap: word-wrap; }
+                Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Set your default volume, startup behavior, keyboard shortcuts, and interface language." : "ولوم پیش‌فرض، رفتار استارت‌آپ، کلیدهای میان‌بر و زبان رابط را تنظیم کن."; color: Colors.muted; wrap: word-wrap; }
                 Rectangle { border-radius: 20px; background: Colors.panel; border-width: 1px; border-color: Colors.border;
                     VerticalLayout { padding: 18px; spacing: 9px; alignment: start;
                         FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; spacing: 16px;
@@ -836,10 +969,10 @@ export component AppWindow inherits Window {
                 Rectangle { border-radius: 20px; background: Colors.panel; border-width: 1px; border-color: Colors.border;
                     VerticalLayout { padding: 18px; spacing: 8px; alignment: start;
                         Toggle { text: root.english ? "Run the application at startup" : "اجرای برنامه هنگام ورود به ویندوز"; enabled: !root.busy; checked <=> root.startup; toggled => { root.startup-changed(); } }
-                        Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Maxi starts in the background. Open it from the tray icon or launch it again; audio starts when you press Run." : "مکسی در پس‌زمینه اجرا می‌شود. از آیکون کنار ساعت یا با اجرای دوباره آن را باز کن؛ صدا با زدن دکمهٔ اجرا شروع می‌شود."; color: Colors.muted; font-size: 11px; wrap: word-wrap; }
+                        Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "The app starts in the background. Open it from the tray icon or launch it again; audio starts when you press Run." : "برنامه در پس‌زمینه اجرا می‌شود. از آیکون کنار ساعت یا با اجرای دوباره آن را باز کن؛ صدا با زدن دکمهٔ اجرا شروع می‌شود."; color: Colors.muted; font-size: 11px; wrap: word-wrap; }
                         Rectangle { height: 1px; background: Colors.border; }
                         Toggle { text: root.english ? "Resume audio after Windows startup" : "ازسرگیری صدا پس از شروع ویندوز"; enabled: root.startup && !root.busy; checked <=> root.startup-active; toggled => { root.config-changed(); } }
-                        Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "When Maxi was running at shutdown, the last output and settings resume automatically at the next startup." : "اگر مکسی هنگام خاموش‌شدن ویندوز در حال اجرا باشد، خروجی و تنظیمات آخر در شروع بعدی خودکار از سر گرفته می‌شوند."; color: Colors.muted; font-size: 11px; wrap: word-wrap; }
+                        Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "When the app was running at shutdown, the last output and settings resume automatically at the next startup." : "اگر برنامه هنگام خاموش‌شدن ویندوز در حال اجرا باشد، خروجی و تنظیمات آخر در شروع بعدی خودکار از سر گرفته می‌شوند."; color: Colors.muted; font-size: 11px; wrap: word-wrap; }
                         if root.startup-message != "": Text { horizontal-alignment: Locale.rtl ? right : left; text: root.startup-message; color: #8fdfdf; font-size: 11px; wrap: word-wrap; }
                     }
                 }
@@ -849,19 +982,19 @@ export component AppWindow inherits Window {
                             Text { layout-order: Locale.rtl ? 0 : 0; horizontal-stretch: 1; horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Interface language" : "زبان رابط کاربری"; color: Colors.text; vertical-alignment: center; }
                             Action { layout-order: Locale.rtl ? -1 : 1; text: root.english ? "فارسی / FA" : "English / EN"; width: 145px; clicked => { root.english = !root.english; root.config-changed(); } }
                         }
-                        Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Persian mirrors the sidebar, menus, cards and text alignment." : "در فارسی، نوار کناری، منوها، کارت‌ها و نوشته‌ها راست‌چین می‌شوند."; color: Colors.muted; font-size: 12px; wrap: word-wrap; }
+                        Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Persian mirrors the sidebar, menus, cards and text alignment." : "در انگلیسی، نوار کناری، منوها، کارت‌ها و نوشته‌ها چپ‌چین می‌شوند."; color: Colors.muted; font-size: 12px; wrap: word-wrap; }
                     }
                 }
                 Rectangle { border-radius: 20px; background: Colors.panel; border-width: 1px; border-color: Colors.border;
                     VerticalLayout { padding: 18px; spacing: 9px; alignment: start;
                         FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; spacing: 12px;
                             VerticalLayout { layout-order: Locale.rtl ? 0 : 0; horizontal-stretch: 1; spacing: 4px;
-                                Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Keyboard shortcuts" : "کلیدهای میانبر"; color: Colors.text; font-size: 18px; font-weight: 750; }
-                                Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Select Record, then press your combination. Esc cancels. Shortcuts also work while Maxi is hidden; media keys control Maxi volume." : "برای تغییر میانبر، «تغییر» را بزن و کلیدها را فشار بده؛ Esc لغو می‌کند. میانبرها در پس‌زمینه هم فعال‌اند و کلیدهای مدیا ولوم مکسی را کنترل می‌کنند."; color: Colors.muted; font-size: 11px; wrap: word-wrap; }
+                                Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Keyboard shortcuts" : "کلیدهای میان‌بر"; color: Colors.text; font-size: 18px; font-weight: 750; }
+                                Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Select Record, then press your combination. Esc cancels. Shortcuts also work while the app is hidden; media keys control its volume." : "برای تغییر میان‌بر، «تغییر» را بزن و کلیدها را فشار بده؛ کلید Esc لغو می‌کند. میان‌برها در پس‌زمینه هم فعال‌اند و کلیدهای مدیا ولوم برنامه را کنترل می‌کنند."; color: Colors.muted; font-size: 11px; wrap: word-wrap; }
                             }
                             Action { layout-order: Locale.rtl ? -1 : 1; width: 150px; text: root.english ? "Restore defaults" : "بازگردانی پیش‌فرض‌ها"; clicked => { root.reset-hotkeys(); } }
                         }
-                        Text { horizontal-alignment: Locale.rtl ? right : left; text: root.hotkey-capture-index >= 0 ? (root.english ? "Press a combination; Escape cancels." : "ترکیب را فشار بده؛ Escape لغو می‌کند.") : ""; color: #a6e8ff; font-size: 11px; }
+                        Text { horizontal-alignment: Locale.rtl ? right : left; text: root.hotkey-capture-index >= 0 ? (root.english ? "Press a combination; Escape cancels." : "ترکیب را فشار بده؛ کلید Escape لغو می‌کند.") : ""; color: #a6e8ff; font-size: 11px; }
                         for row[i] in root.hotkey-rows: HotkeySettingRow {
                             index: i; name: row.name; chord: row.chord; enabled: row.enabled; error: row.error;
                             capturing: root.hotkey-capture-index == i;
@@ -905,42 +1038,68 @@ export component AppWindow inherits Window {
             }
         }
         PageSurface { width: parent.width; height: parent.height; active: root.page == 6;
-            VerticalLayout { padding: 28px; spacing: 20px;
+            about-scroll := ScrollView { content-width: self.visible-width; VerticalLayout { alignment: start; padding: 28px; spacing: 20px;
                 Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "About MAXI SOUNDSET" : "درباره MAXI SOUNDSET"; color: Colors.text; font-size: 28px; font-weight: 800; }
-                about-overview := Rectangle { height: 278px; vertical-stretch: 0; border-radius: 24px; background: Colors.panel; border-width: 1px; border-color: Colors.border;
-                    VerticalLayout { padding: 16px; spacing: 5px; alignment: start;
-                        Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "MAXI SOUNDSET  ·  " + root.version-label : "مکسی سَوندسِت. نسخه ۱.۰.۲"; color: #90dfeb; font-size: 20px; font-weight: 700; }
-                        Rectangle { height: 36px; vertical-stretch: 0; background: transparent;
-                            update-action := Action {
-                                x: Locale.rtl ? parent.width - self.width : 0px;
-                                width: root.app-update-state == 3 ? 172px : 150px;
-                                text: root.app-update-state == 3 ? (root.english ? "Get new version" : "دریافت نسخه جدید") : (root.english ? "Check for updates" : "بررسی بروزرسانی");
-                                primary: root.app-update-state == 3;
-                                selected: root.app-update-state == 3;
-                                enabled: root.app-update-state != 1;
-                                clicked => { if root.app-update-state == 3 { root.open-link("https://github.com/MaxiSpace/MaxiSoundSet/releases"); } else { root.check-app-update(); } }
+                Rectangle { height: 156px + update-controls.height; vertical-stretch: 0; border-radius: 24px; background: Colors.panel; border-width: 1px; border-color: Colors.border;
+                    VerticalLayout { padding: 16px; spacing: 6px; alignment: start;
+                        Text { height: 23px; horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Software updates" : "به‌روزرسانی نرم‌افزار"; color: Colors.text; font-size: 16px; font-weight: 700; }
+                        Text { height: 38px; horizontal-alignment: Locale.rtl ? right : left; vertical-alignment: center; wrap: word-wrap; font-size: 12px;
+                            color: root.app-update-state == 4 || root.app-update-state == 11 ? #ef9a9a : root.app-update-state == 3 ? #ffbf88 : Colors.muted;
+                            text: root.app-update-cancelling ? (root.english ? "Cancelling; waiting for the current network request to stop…" : "در حال لغو؛ منتظر پایان درخواست جاری شبکه…")
+                                : root.app-update-state == 1 ? (root.english ? "Checking stable releases…" : "در حال بررسی نسخه‌های پایدار…")
+                                : root.app-update-state == 2 ? ((root.english ? "No newer stable version. Latest release: " : "نسخهٔ پایدار جدیدتری موجود نیست. آخرین انتشار: ") + root.app-latest-version)
+                                : root.app-update-state == 3 ? ((root.english ? "New stable version: " : "نسخهٔ پایدار جدید: ") + root.app-latest-version)
+                                : root.app-update-state == 5 ? ((root.english ? "Downloading: " : "در حال دریافت: ") + round(root.app-update-progress * 100) + (root.english ? "%" : "٪"))
+                                : root.app-update-state == 6 ? (root.english ? "Verifying the downloaded installer…" : "در حال بررسی اعتبار فایل نصب…")
+                                : root.app-update-state == 7 ? (root.english ? "Preparing the update and restoring audio before exit…" : "در حال آماده‌سازی به‌روزرسانی و بازیابی صدا پیش از خروج…")
+                                : root.app-update-state == 8 ? (root.english ? "Download cancelled. You can try again." : "دریافت لغو شد؛ امکان تلاش دوباره وجود دارد.")
+                                : root.app-update-state == 9 ? ((root.english ? "Update installed successfully: " : "به‌روزرسانی با موفقیت نصب شد: ") + root.app-version)
+                                : root.app-update-state == 10 ? (root.english ? "Update failed. The previous version was restored." : "به‌روزرسانی ناموفق بود؛ نسخهٔ پیشین بازیابی شد.")
+                                : root.app-update-state == 11 ? (root.english ? "Recovery needs attention. Backups were kept; open the log for their location." : "بازیابی نیازمند بررسی است؛ نسخهٔ پشتیبان حفظ شد. مسیر آن در گزارش آمده است.")
+                                : root.app-update-state == 4 ? (root.app-update-error-kind == 1 ? (root.english ? "Network request failed. Check the connection and retry." : "درخواست شبکه ناموفق بود؛ اتصال را بررسی کنید و دوباره تلاش کنید.")
+                                    : root.app-update-error-kind == 2 ? (root.english ? "Release information could not be verified. Retry the check." : "اطلاعات انتشار تأیید نشد؛ بررسی نسخه را دوباره انجام دهید.")
+                                    : root.app-update-error-kind == 3 ? (root.english ? "The new release has no valid Windows installer. Retry after its assets are corrected." : "انتشار جدید فایل نصب معتبر ویندوز ندارد؛ پس از اصلاح فایل‌های انتشار دوباره بررسی کنید.")
+                                    : root.app-update-error-kind == 4 ? (root.english ? "The download is incomplete or invalid. It was not run; download it again." : "فایل دریافت‌شده ناقص یا نامعتبر است؛ اجرا نشد. آن را دوباره دریافت کنید.")
+                                    : root.app-update-error-kind == 5 ? (root.english ? "This app does not match the registered installation. Run it from its installed location." : "این برنامه با نصب ثبت‌شده مطابقت ندارد؛ آن را از مسیر نصب‌شده اجرا کنید.")
+                                    : root.app-update-error-kind == 7 ? (root.english ? "Audio recovery or safe exit is incomplete. Stop audio, exit safely, and retry." : "بازیابی صدا یا خروج امن کامل نشده است؛ صدا را متوقف کنید، خروج امن انجام دهید و دوباره تلاش کنید.")
+                                    : (root.english ? "The update could not continue. Open the log for details and retry." : "ادامهٔ به‌روزرسانی ممکن نشد؛ جزئیات را در گزارش ببینید و دوباره تلاش کنید."))
+                                : (root.english ? "Check for a newer stable version; installation starts only when you choose Install." : "نسخهٔ پایدار جدید را بررسی کنید؛ نصب فقط با انتخاب گزینهٔ نصب آغاز می‌شود.");
+                        }
+                        Rectangle { height: 4px; vertical-stretch: 0; background: Colors.border; border-radius: 2px;
+                            Rectangle { width: parent.width * clamp(root.app-update-progress, 0, 1); background: Colors.accent; border-radius: 2px; }
+                        }
+                        Text { height: 30px; horizontal-alignment: Locale.rtl ? right : left; wrap: word-wrap; font-size: 11px; color: Colors.muted; text: root.english ? "Updates use the existing installation folder and preserve your data and settings." : "به‌روزرسانی در مسیر نصب فعلی انجام می‌شود و داده‌ها و تنظیمات حفظ می‌شوند."; }
+                        update-controls := Rectangle {
+                            property <length> install-offset: self.width >= 280px ? 156px : 0px;
+                            property <length> install-top: self.width >= 280px ? 0px : 44px;
+                            property <length> log-start: install-update.visible ? self.install-offset + 132px : 156px;
+                            property <length> log-offset: self.log-start + 88px <= self.width ? self.log-start : 0px;
+                            property <length> log-top: (install-update.visible ? self.install-top : 0px) + (self.log-start + 88px <= self.width ? 0px : 44px);
+                            property <length> notes-start: update-log.visible ? self.log-offset + 96px : install-update.visible ? self.install-offset + 132px : 156px;
+                            property <length> notes-offset: self.notes-start + 140px <= self.width ? self.notes-start : 0px;
+                            property <length> notes-top: (update-log.visible ? self.log-top : install-update.visible ? self.install-top : 0px) + (self.notes-start + 140px <= self.width ? 0px : 44px);
+                            height: self.notes-top + 36px; vertical-stretch: 0; background: transparent;
+                            check-update := Action { width: 148px; height: 36px; y: 0px; x: Locale.rtl ? parent.width - self.width : 0px; text: root.english ? "Check for updates" : "بررسی به‌روزرسانی"; enabled: !root.app-update-working; clicked => { root.check-app-update(); } }
+                            install-update := Action { width: 124px; height: 36px; x: Locale.rtl ? parent.width - self.width - update-controls.install-offset : update-controls.install-offset; y: update-controls.install-top; visible: root.app-update-installable; enabled: !root.app-update-working; primary: true; text: root.english ? "Install update" : "نصب به‌روزرسانی"; clicked => { root.install-app-update(); } }
+                            update-log := Action { width: 88px; height: 36px; x: Locale.rtl ? parent.width - self.width - update-controls.log-offset : update-controls.log-offset; y: update-controls.log-top;
+                                visible: (root.app-update-working && root.app-update-state != 7) || root.app-update-state == 4 || root.app-update-state == 11;
+                                enabled: !root.app-update-cancelling;
+                                text: root.app-update-working ? (root.english ? "Cancel" : "لغو") : (root.english ? "View log" : "مشاهدهٔ گزارش");
+                                clicked => { if root.app-update-working { root.cancel-app-update(); } else { root.open-log-file(); } }
                             }
-                            Text {
-                                x: root.app-update-state == 4 ? (Locale.rtl ? parent.width - update-action.width - 244px : update-action.width + 12px) : (Locale.rtl ? 0px : update-action.width + 12px);
-                                width: root.app-update-state == 4 ? 220px : parent.width - update-action.width - 12px;
-                                horizontal-alignment: Locale.rtl ? right : left;
-                                vertical-alignment: center;
-                                text: root.app-update-state == 1 ? (root.english ? "Checking GitHub…" : "در حال بررسی GitHub…")
-                                    : root.app-update-state == 2 ? ((root.english ? "Latest version: " : "آخرین نسخه موجود: ") + root.app-latest-version + "  ✓")
-                                    : root.app-update-state == 3 ? ((root.english ? "New version: " : "نسخه جدید: ") + root.app-latest-version + "  !")
-                                    : root.app-update-state == 4 ? (root.english ? "⚠  Could not check. Try again." : "⚠  بررسی انجام نشد؛ دوباره تلاش کنید.") : "";
-                                color: root.app-update-state == 2 ? #8bdfce : root.app-update-state == 3 ? #ffbf88 : root.app-update-state == 4 ? #ef9a9a : Colors.muted;
-                                font-size: 12px;
-                                overflow: elide;
-                            }
-                            Action {
-                                visible: root.app-update-state == 4;
-                                x: Locale.rtl ? parent.width - update-action.width - 332px : update-action.width + 244px;
-                                width: 76px;
-                                text: root.english ? "View log" : "مشاهده لاگ";
-                                clicked => { root.open-log-file(); }
+                            Action { width: 140px; height: 36px;
+                                x: Locale.rtl ? parent.width - self.width - update-controls.notes-offset : update-controls.notes-offset;
+                                y: update-controls.notes-top;
+                                enabled: root.app-release-notes-ready;
+                                text: root.english ? "Release notes" : "یادداشت انتشار";
+                                clicked => { root.open-app-release-notes(); }
                             }
                         }
+                    }
+                }
+                about-overview := Rectangle { height: 236px; vertical-stretch: 0; border-radius: 24px; background: Colors.panel; border-width: 1px; border-color: Colors.border;
+                    VerticalLayout { padding: 16px; spacing: 5px; alignment: start;
+                        Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "MAXI SOUNDSET  ·  " + root.version-label : "مکسی سَوندسِت. نسخه " + root.app-version; color: #90dfeb; font-size: 20px; font-weight: 700; }
                         Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Better sound for you · Audio processing and loudness control" : "صدای بهتر برای تو · پردازش صدا و کنترل بلندی"; color: Colors.muted; font-size: 13px; wrap: word-wrap; }
                         Text { horizontal-alignment: Locale.rtl ? right : left; text: "Windows · x64"; color: Colors.text; font-size: 13px; }
                         Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Production year: 2026" : "سال تولید: ۲۰۲۶"; color: Colors.text; font-size: 14px; }
@@ -965,21 +1124,69 @@ export component AppWindow inherits Window {
                 }
                 Rectangle { vertical-stretch: 1; background: transparent; }
                 about-notices := Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "© 2026 MaxiSpace. All rights reserved." : "© ۲۰۲۶ MaxiSpace. تمامی حقوق این نرم‌افزار متعلق به این برند است."; color: Colors.muted; font-size: 11px; wrap: word-wrap; }
-            }
+            } }
         }
 
         }
 
+        }
     }
-    if root.pending-conflict >= 0: Rectangle { background: #020716b0;
+    if root.compact-menu-presented: Rectangle { background: transparent;
+        Rectangle { background: #020716b0; opacity: root.compact-menu-reveal; }
+        TouchArea { clicked => { root.close-sidebar-menu(); } scroll-event(event) => { return accept; } }
+    }
+        sidebar-panel := Rectangle { x: (Locale.rtl ? root.width - self.width : 0px) + (root.compact-menu-presented ? (Locale.rtl ? 1 : -1) * (1 - root.compact-menu-reveal) * 132px : 0px); y: 0px; height: root.height;
+            width: root.compact-menu-presented ? 216px : sidebar-slot.width;
+
+            background: @linear-gradient(180deg, #172338ee 0%, #0b1329f5 100%);
+            border-width: 1px; border-color: #40547470; clip: true;
+            TouchArea { scroll-event(event) => { return accept; } }
+            VerticalLayout { padding: 16px; spacing: 8px;
+                FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: (root.sidebar-open || root.compact-menu-presented) ? stretch : center; height: 43px; spacing: (root.sidebar-open || root.compact-menu-presented) ? 10px : 0px;
+
+                    if (root.sidebar-open || root.compact-menu-presented): Rectangle { layout-order: Locale.rtl ? -1 : 1; horizontal-stretch: 1; background: transparent; }
+                    sidebar-toggle := Action { layout-order: Locale.rtl ? -2 : 2; text: ""; accessible-label: "Toggle sidebar";  width: 36px; clicked => { root.toggle-sidebar(); }
+                        Image { source: ((root.sidebar-open || root.compact-menu-presented) == Locale.rtl) ? @image-url("../assets/chevron-right.svg") : @image-url("../assets/chevron-left.svg"); width: 20px; height: 20px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
+                    }
+                }
+                if !(root.sidebar-open || root.compact-menu-presented): Image { source: @image-url("../assets/sidebar-logo.svg"); width: 52px; height: 52px; image-fit: contain; }
+                if (root.sidebar-open || root.compact-menu-presented): VerticalLayout { spacing: 5px;
+                    Text { horizontal-alignment: Locale.rtl ? right : left; text: root.sidebar-brand-text; color: Colors.text; font-size: 20px; font-weight: 800; }
+                    Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Better sound for you" : "صدای بهتر برای تو"; color: Colors.muted; font-size: 10px; }
+                }
+                Rectangle { height: 1px; background: #41567765; }
+                sidebar-scroll := ScrollView { vertical-stretch: 1; horizontal-stretch: 1; VerticalLayout { spacing: 6px;
+                sound-nav := NavAction { order: 0; text: root.english ? "Sound" : "صدا"; icon: @image-url("../assets/nav-sound.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); selected: root.page == 0; clicked => { root.select-page(0); } }
+                components-nav := NavAction { order: 2; text: root.english ? "Components" : "افزونه‌ها"; icon: @image-url("../assets/nav-components.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); selected: root.page == 1; clicked => { root.select-page(1); } }
+                log-nav := NavAction { order: 3; text: root.log-label; icon: @image-url("../assets/nav-log.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); selected: root.page == 2; clicked => { root.select-page(2); } }
+                settings-nav := NavAction { order: 4; text: root.english ? "Settings" : "تنظیمات"; icon: @image-url("../assets/nav-settings.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); selected: root.page == 4; clicked => { root.select-page(4); } }
+                conflicts-nav := NavAction { order: 5; text: (root.english ? "Audio conflicts" : "تداخل صوتی") + (root.conflicts.length > 0 ? " (" + root.conflicts.length + ")" : ""); icon: @image-url("../assets/nav-conflicts.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); selected: root.page == 5; clicked => { root.select-page(5); root.refresh-conflicts(); } }
+                about-nav := NavAction { order: 6; text: root.english ? "About" : "درباره برنامه"; icon: @image-url("../assets/nav-about.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); selected: root.page == 6; clicked => { root.select-page(6); } }
+                if root.cable-warning-visible: Rectangle {
+                    height: (root.sidebar-open || root.compact-menu-presented) ? 105px : 38px;
+                    background: #503a2233; border-radius: 12px; border-width: 1px; border-color: #d5a16670;
+                    Text { x: 10px; y: 8px; width: parent.width - 20px; height: parent.height - 16px; text: (root.sidebar-open || root.compact-menu-presented) ? (root.english ? "For better results and full app functionality, install the virtual cable add-on from Components." : "برای نتیجهٔ بهتر و استفادهٔ کامل از قابلیت‌های نرم‌افزار، افزونهٔ کابل مجازی را از بخش افزونه‌ها نصب کنید.") : "⚠"; color: #e5b585; font-size: (root.sidebar-open || root.compact-menu-presented) ? 11px : 20px; wrap: word-wrap; horizontal-alignment: (root.sidebar-open || root.compact-menu-presented) ? (Locale.rtl ? right : left) : center; vertical-alignment: center; }
+                    TouchArea { mouse-cursor: pointer; clicked => { root.select-page(1); } }
+                }
+                Rectangle { min-height: 0px; vertical-stretch: 1; background: transparent; }
+                donate-nav := NavAction { text: root.english ? "Donate" : "دونیت"; icon: @image-url("../assets/nav-donate.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); clicked => { root.open-link("https://maxispace.dev/donate"); } }
+                language-nav := NavAction { text: root.english ? "فارسی / FA" : "English / EN"; icon: @image-url("../assets/nav-language.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); clicked => { root.english = !root.english; root.config-changed(); } }
+                if (root.sidebar-open || root.compact-menu-presented): Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "X keeps the app running in the tray." : "ضربدر: ادامهٔ اجرا کنار ساعت"; color: Colors.muted; font-size: 10px; wrap: word-wrap; }
+                exit-nav := NavAction { text: root.english ? "Exit app" : "خروج از برنامه"; icon: @image-url("../assets/nav-exit.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); clicked => { root.exit-app(); } }
+                Text { text: root.version-label; color: Colors.muted; font-size: 10px; horizontal-alignment: center; }
+                } }
+            }
+            TouchArea { visible: root.compact-menu-presented && !root.compact-menu-open; y: 60px; width: parent.width; height: parent.height - 60px; clicked => { } scroll-event(event) => { return accept; } }
+        }
+    Rectangle { visible: root.pending-conflict >= 0; background: #020716b0;
         TouchArea { }
-        Rectangle { width: 465px; height: 230px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; border-radius: 26px; background: #10223e; border-width: 1px; border-color: Colors.accent;
+        Rectangle { width: min(465px, parent.width - 24px); height: min(230px, parent.height - 24px); x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; border-radius: 26px; background: #10223e; border-width: 1px; border-color: Colors.accent;
             VerticalLayout { padding: 25px; spacing: 16px;
                 Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "End " + root.pending-name + "?" : "بستن " + root.pending-name + "؟"; color: Colors.text; font-size: 20px; font-weight: 700; wrap: word-wrap; }
                 Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "This ends the selected app immediately. Unsaved changes in it may be lost." : "این کار برنامهٔ انتخاب‌شده را کامل می‌بندد. تغییرات ذخیره‌نشدهٔ آن ممکن است از دست بروند."; color: Colors.muted; wrap: word-wrap; font-size: 12px; }
                 FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; spacing: 14px;
-                    Action { layout-order: Locale.rtl ? 0 : 0; text: root.english ? "Cancel" : "انصراف"; clicked => { root.pending-conflict = -1; } }
-                    Action { layout-order: Locale.rtl ? -1 : 1; text: root.english ? "End app" : "بستن کامل برنامه"; selected: true; clicked => { root.end-conflict(root.pending-conflict); root.pending-conflict = -1; } }
+                    confirmation-cancel := Action { layout-order: Locale.rtl ? 0 : 0; text: root.english ? "Cancel" : "انصراف"; clicked => { root.pending-conflict = -1; } }
+                    confirmation-end := Action { layout-order: Locale.rtl ? -1 : 1; text: root.english ? "End app" : "بستن کامل برنامه"; selected: true; clicked => { root.end-conflict(root.pending-conflict); root.pending-conflict = -1; } }
                 }
             }
         }
@@ -987,6 +1194,7 @@ export component AppWindow inherits Window {
 
 }
 
+}
 export component MaxiTray inherits SystemTrayIcon {
     visible: root.tray-visible;
     in-out property <bool> tray-visible: true;

@@ -7,7 +7,7 @@
 
 **Adaptive Audio Processing & Loudness Control for Windows**
 
-[![Release](https://img.shields.io/badge/Release-v1.0.2-2ea44f?style=for-the-badge&logo=github)](../../releases)
+[![Release](https://img.shields.io/badge/Release-v1.0.3-2ea44f?style=for-the-badge&logo=github)](../../releases)
 [![Rust](https://img.shields.io/badge/Rust-black?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Slint](https://img.shields.io/badge/Slint-UI-27ae60?style=for-the-badge)](https://slint.dev/)
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://microsoft.com/windows)
@@ -48,13 +48,13 @@ Designed for speed and low memory footprint, it runs smoothly in the background 
 
 <div align="center">
 
-[![Download MAXI SOUNDSET](https://img.shields.io/badge/Download-MAXI--SOUNDSET--v1.0.2--Setup.exe-success?style=for-the-badge&logo=windows&logoColor=white)](../../releases)
+[![Download MAXI SOUNDSET](https://img.shields.io/badge/Download-MAXI--SOUNDSET--v1.0.3--Setup.exe-success?style=for-the-badge&logo=windows&logoColor=white)](../../releases)
 
 *Compatible with Windows 10 & 11 (64-bit)*
 
 </div>
 
-1. Download **`MAXI-SOUNDSET-v1.0.2-Setup.exe`** from the [Releases](../../releases) page.
+1. Download **`MAXI-SOUNDSET-v1.0.3-Setup.exe`** from the [Releases](../../releases) page.
 2. Run the installer and complete the setup.
 3. The application can also be launched directly from its installed folder.
 
@@ -139,7 +139,7 @@ If you enjoy using MAXI SOUNDSET and want to support its ongoing development, yo
 
 ## 🔄 Updates
 
-The **About** tab inside the application checks GitHub Releases for new software versions. Checking for supplementary components (such as Virtual Cable driver availability) runs independently from main application updates.
+The **About** tab lets you check for a new version, view its release notes, and download and install the update when you choose. The installer detects the existing installation folder and preserves settings and shortcuts. Component checks, including VB-CABLE, remain separate from app updates.
 
 ---
 
@@ -177,13 +177,13 @@ MAXI SOUNDSET is licensed under the [GNU General Public License v3.0](MaxiSoundS
 
 <div align="center">
 
-[![دانلود مکسی سوندست](https://img.shields.io/badge/دانلود-MAXI--SOUNDSET--v1.0.2--Setup.exe-success?style=for-the-badge&logo=windows&logoColor=white)](../../releases)
+[![دانلود مکسی سوندست](https://img.shields.io/badge/دانلود-MAXI--SOUNDSET--v1.0.3--Setup.exe-success?style=for-the-badge&logo=windows&logoColor=white)](../../releases)
 
 *سازگار با ویندوز ۱۰ و ۱۱ (نسخهٔ ۶۴ بیتی)*
 
 </div>
 
-۱. فایل نصبی **`MAXI-SOUNDSET-v1.0.2-Setup.exe`** را از صفحهٔ [انتشارها (Releases)](../../releases) دریافت کنید.
+۱. فایل نصبی **`MAXI-SOUNDSET-v1.0.3-Setup.exe`** را از صفحهٔ [انتشارها (Releases)](../../releases) دریافت کنید.
 ۲. فایل را اجرا کرده و مراحل نصب را تکمیل کنید.  
 ۳. برنامه پس از نصب به‌صورت مستقیم از پوشهٔ محل نصب نیز قابل اجرا است.
 
@@ -268,7 +268,7 @@ MAXI SOUNDSET is licensed under the [GNU General Public License v3.0](MaxiSoundS
 
 ## 🔄 به‌روزرسانی
 
-تب **«درباره برنامه»** در نرم‌افزار، به‌صورت خودکار نسخه‌های جدید منتشرشده در گیت‌هاب را استعلام می‌کند. بررسی وضعیت افزونه‌های جانبی (مانند درایور کابل مجازی)، مستقل از بررسی آپدیت نسخهٔ اصلی برنامه انجام می‌پذیرد.
+تب **«دربارهٔ برنامه»** امکان بررسی نسخهٔ جدید، مشاهدهٔ یادداشت انتشار و دانلود و نصب به‌روزرسانی را با انتخاب کاربر فراهم می‌کند. نصاب، مسیر نصب موجود را تشخیص می‌دهد و تنظیمات و میان‌برها را حفظ می‌کند. بررسی اجزای جانبی، از جمله کابل مجازی، مستقل از به‌روزرسانی برنامه است.
 
 ---
 

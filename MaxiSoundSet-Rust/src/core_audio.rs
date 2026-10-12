@@ -8,18 +8,16 @@ use std::{
 use windows::{
     core::{IUnknown, IUnknown_Vtbl, Interface, GUID, HRESULT, PCWSTR},
     Win32::{
-        Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
         Media::Audio::{
             eMultimedia, eRender, ERole,
             Endpoints::{IAudioEndpointVolume, IAudioMeterInformation},
             IAudioCaptureClient, IAudioClient, IAudioRenderClient, IMMDevice, IMMDeviceEnumerator,
-            ISimpleAudioVolume, MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED, DEVICE_STATE_ACTIVE,
+            ISimpleAudioVolume, MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED,
             WAVEFORMATEX,
         },
         System::Com::{
             CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
-            StructuredStorage::{PropVariantClear, PropVariantToStringAlloc},
-            CLSCTX_ALL, COINIT_APARTMENTTHREADED, STGM_READ,
+            CLSCTX_ALL, COINIT_APARTMENTTHREADED,
         },
     },
 };
@@ -69,40 +67,20 @@ pub struct DeviceInfo {
     pub id: String,
     pub name: String,
     pub virtual_input: bool,
+    pub vb_cable: bool,
+}
+impl DeviceInfo {
+    fn from_endpoint(endpoint: crate::cable_evidence::Endpoint) -> Self {
+        let vb_cable = crate::cable_evidence::is_vb_cable_interface(&endpoint.interface);
+        let name = endpoint.name.to_ascii_lowercase();
+        Self { id: endpoint.id, name: endpoint.name, vb_cable,
+            virtual_input: vb_cable || name.contains("cable") || name.contains("voicemeeter") || name.contains("virtual audio") }
+    }
 }
 pub fn devices() -> Result<Vec<DeviceInfo>> {
-    let _com = ComScope::new()?;
-    let mut result = Vec::new();
-    unsafe {
-        let collection = enumerator()?.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)?;
-        for i in 0..collection.GetCount()? {
-            let d = collection.Item(i)?;
-            let p = d.GetId()?;
-            let id = p.to_string();
-            CoTaskMemFree(Some(p.0.cast()));
-            let id = id?;
-            let store = d.OpenPropertyStore(STGM_READ)?;
-            let mut value = store.GetValue(&PKEY_Device_FriendlyName)?;
-            let name = match PropVariantToStringAlloc(&value) {
-                Ok(p) => {
-                    let s = p.to_string().unwrap_or_else(|_| id.clone());
-                    CoTaskMemFree(Some(p.0.cast()));
-                    s
-                }
-                Err(_) => id.clone(),
-            };
-            let _ = PropVariantClear(&mut value);
-            let n = name.to_ascii_lowercase();
-            let virtual_input =
-                n.contains("cable") || n.contains("voicemeeter") || n.contains("virtual audio");
-            result.push(DeviceInfo {
-                id,
-                name,
-                virtual_input,
-            });
-        }
-    }
-    Ok(result)
+    let inventory = crate::cable_evidence::native_active_inventory()?;
+    anyhow::ensure!(!inventory.enumeration_failed, "Audio endpoint identities could not be completely determined");
+    Ok(inventory.endpoints.into_iter().filter(|e| e.active).map(DeviceInfo::from_endpoint).collect())
 }
 
 pub struct Endpoint {
@@ -546,4 +524,24 @@ pub fn diagnose() -> Result<String> {
         "Diagnostic changed volume"
     );
     Ok(report)
+}
+
+#[cfg(test)]
+mod cable_identity_tests {
+    use super::*;
+    #[test]
+    fn cable_identity_survives_rename_and_id_change_without_claiming_other_virtual_devices() {
+        let endpoint = |id: &str, name: &str, interface: &str| crate::cable_evidence::Endpoint {
+            id: id.into(), name: name.into(), interface: interface.into(), active: true, hardware: crate::cable_evidence::Hardware::Unknown,
+        };
+        for (id, name) in [("old-id", "ورودی صدا"), ("new-id", "CABLE In 16ch"), ("new-id", "Renamed input")] {
+            let device = DeviceInfo::from_endpoint(endpoint(id, name, "VB-Audio Virtual Cable"));
+            assert!(device.vb_cable && device.virtual_input);
+            assert_eq!(device.id, id);
+        }
+        let other = DeviceInfo::from_endpoint(endpoint("other", "Voicemeeter Input", "VB-Audio Voicemeeter"));
+        assert!(other.virtual_input && !other.vb_cable);
+        let physical = DeviceInfo::from_endpoint(endpoint("physical", "Speakers", "USB Audio"));
+        assert!(!physical.virtual_input && !physical.vb_cable);
+    }
 }

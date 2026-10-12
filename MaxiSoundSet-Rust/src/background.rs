@@ -70,14 +70,16 @@ mod tests {
     #[test]
     fn exit_is_not_blocked_by_a_settings_write_failure() {
         let directory = directory("exit-save-failure");
-        let invalid_data = directory.join("not-a-directory");
-        std::fs::write(&invalid_data, "unchanged marker").unwrap();
+        // Recovery is verifiably clear, while settings alone cannot be written.
+        let invalid_settings = directory.join("settings.json");
+        std::fs::create_dir(&invalid_settings).unwrap();
+        std::fs::write(invalid_settings.join("marker.txt"), "unchanged marker").unwrap();
         let worker = Background::new();
         worker
             .submit(Job::Exit(
                 AudioEngine::new(),
                 Settings::default(),
-                invalid_data.clone(),
+                directory.clone(),
             ))
             .unwrap();
         match worker.events.recv_timeout(Duration::from_secs(5)).unwrap() {
@@ -85,7 +87,7 @@ mod tests {
             _ => panic!("Exit result missing after settings failure"),
         }
         assert_eq!(
-            std::fs::read_to_string(invalid_data).unwrap(),
+            std::fs::read_to_string(invalid_settings.join("marker.txt")).unwrap(),
             "unchanged marker"
         );
         std::fs::remove_dir_all(directory).unwrap();
@@ -153,7 +155,28 @@ impl Background {
                             settings.startup = enabled;
                         }
                         log::info!("Exit app: restoring audio and saving settings");
-                        let result = engine.shutdown();
+                        let result = engine.shutdown().and_then(|_| {
+                            // Windows can report NotFound for a marker beneath a file.
+                            // Validate the data directory itself before accepting no marker.
+                            let metadata = std::fs::symlink_metadata(&data)?;
+                            #[cfg(windows)]
+                            let reparse = {
+                                use std::os::windows::fs::MetadataExt;
+                                metadata.file_attributes() & 0x400 != 0
+                            };
+                            #[cfg(not(windows))]
+                            let reparse = false;
+                            anyhow::ensure!(
+                                metadata.is_dir() && !metadata.file_type().is_symlink() && !reparse,
+                                "Audio recovery directory could not be verified. Retry Exit app."
+                            );
+                            anyhow::ensure!(
+                                crate::cable_evidence::recovery(&data)
+                                    == crate::cable_evidence::Recovery::Clear,
+                                "Audio restoration could not be verified. Reconnect the previous output and retry Exit app."
+                            );
+                            Ok(())
+                        });
                         if result.is_ok() {
                             if let Err(e) = settings.save(&data) {
                                 log::error!("Saving settings on exit: {e:#}");

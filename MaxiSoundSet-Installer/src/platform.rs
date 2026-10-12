@@ -16,6 +16,65 @@ use windows::{
 pub const UNINSTALL_KEY: &str =
     "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\MAXISOUNDSET";
 pub const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+/// Serialize coordinators for the same canonical installation across processes.
+/// Windows mutex ownership is thread-bound; Rc phantom deliberately prevents Send/Sync.
+pub struct RootLease {
+    handle: windows::Win32::Foundation::HANDLE,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+impl Drop for RootLease {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::System::Threading::ReleaseMutex(self.handle);
+            let _ = windows::Win32::Foundation::CloseHandle(self.handle);
+        }
+    }
+}
+pub fn acquire_root_lease(root: &Path) -> Result<RootLease> {
+    use sha2::{Digest,Sha256};
+    use windows::Win32::{Foundation::{CloseHandle,WAIT_OBJECT_0,WAIT_ABANDONED},System::Threading::{CreateMutexW,WaitForSingleObject,ReleaseMutex}};
+    let root = crate::operations::safe_root(root)?;
+    // Install may target a not-yet-created directory. Canonicalize its existing ancestor
+    // before appending the missing suffix, so the lease name stays stable after creation.
+    let mut ancestor = root.as_path(); let mut missing = Vec::new();
+    while !ancestor.try_exists()? {
+        missing.push(ancestor.file_name().context("Missing installation directory name")?.to_os_string());
+        ancestor = ancestor.parent().context("Missing existing installation ancestor")?;
+    }
+    let mut canonical = crate::operations::local_canonical(ancestor)?;
+    for component in missing.iter().rev() { canonical.push(component); }
+    let normalized = canonical.to_string_lossy().trim_end_matches(['\\','/']).replace('/',"\\").to_lowercase();
+    let name = wide(format!("Local\\MAXISOUNDSET.InstallLease.v1.{:x}",Sha256::digest(normalized.as_bytes())));
+    let handle = unsafe { CreateMutexW(None,false,PCWSTR(name.as_ptr()))? };
+    let state = unsafe { WaitForSingleObject(handle,0) };
+    if state != WAIT_OBJECT_0 {
+        // Abandonment means ownership was acquired, but the previous operation may have
+        // left a partial transaction. Release and stop rather than assume its state.
+        unsafe { if state == WAIT_ABANDONED { let _ = ReleaseMutex(handle); } let _ = CloseHandle(handle); }
+        anyhow::bail!("Installation is busy or its previous coordinator stopped unexpectedly; retry after checking retained update backups");
+    }
+    Ok(RootLease { handle, _thread_bound: std::marker::PhantomData })
+}
+
+#[cfg(test)]
+mod update_lease_tests {
+    use super::*;
+    #[test]
+    fn update_root_lease_is_busy_on_other_thread_and_free_after_drop() {
+        let root = std::env::temp_dir().join(format!("lease-{}",crate::update_handoff::token().unwrap()));
+        let owner = acquire_root_lease(&root).unwrap();
+        let competing = root.clone();
+        assert!(std::thread::spawn(move || acquire_root_lease(&competing).is_err()).join().unwrap());
+        fs::create_dir(&root).unwrap();
+        // Creating the directory must not change its mutex identity.
+        let existing = root.clone();
+        assert!(std::thread::spawn(move || acquire_root_lease(&existing).is_err()).join().unwrap());
+        drop(owner);
+        let free = root.clone();
+        assert!(std::thread::spawn(move || acquire_root_lease(&free).is_ok()).join().unwrap());
+        fs::remove_dir(root).unwrap();
+    }
+}
 pub fn wide(s: impl AsRef<std::ffi::OsStr>) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
     s.as_ref().encode_wide().chain(Some(0)).collect()
@@ -162,6 +221,32 @@ fn number(n: u32) -> Value {
 pub struct Snapshot {
     values: Vec<(String, String, Option<Value>)>,
     existed: bool,
+}
+/// Upgrade touches only version/size; startup and Shell Links retain their bytes.
+pub struct UpdateMetadataSnapshot {
+    version: Option<Value>,
+    size: Option<Value>,
+}
+impl UpdateMetadataSnapshot {
+    pub fn capture() -> Result<Self> {
+        Ok(Self { version: raw(UNINSTALL_KEY, "DisplayVersion")?, size: raw(UNINSTALL_KEY, "EstimatedSize")? })
+    }
+    pub fn restore(&self) -> Result<()> {
+        put(UNINSTALL_KEY, "DisplayVersion", self.version.as_ref())?;
+        put(UNINSTALL_KEY, "EstimatedSize", self.size.as_ref())
+    }
+    pub fn record(&self) -> serde_json::Value {
+        let encode = |value: &Option<Value>| value.as_ref().map(|v| serde_json::json!({"kind":v.kind.0,"bytes":v.bytes}));
+        serde_json::json!({"DisplayVersion":encode(&self.version),"EstimatedSize":encode(&self.size)})
+    }
+}
+pub fn update_registration_metadata(root: &Path, version: &str, size: u32) -> Result<()> {
+    ensure!(text(UNINSTALL_KEY, "InstallLocation")?.is_some_and(|p| same(Path::new(&p), root)), "Registered update location changed");
+    if TEST_SCOPE.with(|s| s.borrow().is_some()) && FAIL_REGISTER.with(|f| f.replace(false)) {
+        anyhow::bail!("Controlled isolated-test metadata failure");
+    }
+    put(UNINSTALL_KEY, "DisplayVersion", Some(&string(version)))?;
+    put(UNINSTALL_KEY, "EstimatedSize", Some(&number(size)))
 }
 const NAMES: [&str; 9] = [
     "DisplayName",

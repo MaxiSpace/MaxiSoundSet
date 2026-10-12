@@ -60,12 +60,21 @@ impl Controls {
         }
     }
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MeasurementSource {
+    Sampled,
+    PeakEstimate,
+    #[default]
+    Unavailable,
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct AudioSnapshot {
     pub meters: MeterReading,
     pub muted: bool,
     pub silent: bool,
     pub reference: f32,
+    pub source: MeasurementSource,
 }
 #[derive(Debug)]
 pub enum AudioEvent {
@@ -133,7 +142,7 @@ impl AudioEngine {
             let result = (|| -> Result<()> { let _com = ComScope::new()?; if settings.mode == 1 { run_full(&settings, &data, &controls, &snapshot, &events) } else { run_system(&settings, &data, &controls, &snapshot, &events) } })();
             if let Err(e) = result { log::error!("Audio engine error: {e:#}"); let _ = events.send(AudioEvent::Error(format!("{e:#}"))); }
             if data.join("recovery.json").exists() { let _ = events.send(AudioEvent::RestoreWarning("Audio restoration is incomplete. Reconnect the previous device or select speakers in Windows sound settings.".into())); }
-            *snapshot.lock().unwrap_or_else(|p| p.into_inner()) = AudioSnapshot::default(); let _ = events.send(AudioEvent::Stopped); log::info!("Audio engine stopped");
+            self::snapshot(&snapshot, AudioSnapshot::default()); let _ = events.send(AudioEvent::Stopped); log::info!("Audio engine stopped");
         })?);
         Ok(())
     }
@@ -175,7 +184,30 @@ impl Drop for AudioEngine {
 }
 
 fn snapshot(store: &Mutex<AudioSnapshot>, value: AudioSnapshot) {
-    *store.lock().unwrap_or_else(|p| p.into_inner()) = value;
+    let mut current = store.lock().unwrap_or_else(|p| p.into_inner());
+    if current.source != value.source {
+        log::info!("Audio measurement source: {:?} -> {:?}", current.source, value.source);
+    }
+    *current = value;
+}
+
+fn measurement_source(
+    capture_available: bool,
+    has_packet: bool,
+    packet_age: Duration,
+    fallback: bool,
+) -> MeasurementSource {
+    if fallback {
+        MeasurementSource::PeakEstimate
+    } else if capture_available && has_packet && packet_age <= Duration::from_millis(250) {
+        MeasurementSource::Sampled
+    } else {
+        MeasurementSource::Unavailable
+    }
+}
+
+fn uses_peak_fallback(capture_available: bool, packet_age: Duration, peak: f32) -> bool {
+    !capture_available || (packet_age > Duration::from_millis(250) && peak > 0.001)
 }
 fn run_system(
     s: &Settings,
@@ -215,6 +247,7 @@ fn run_system(
     let mut last = Instant::now();
     let mut last_audio = Instant::now() - Duration::from_secs(1);
     let mut last_packet = Instant::now();
+    let mut has_packet = false;
     let mut last_debug = Instant::now();
     let mut engaged = false;
     let mut was_zero = false;
@@ -228,6 +261,7 @@ fn run_system(
     while !controls.stop.load(Ordering::Relaxed) {
         let dt = last.elapsed().as_secs_f64().clamp(0.001, 0.1);
         last = Instant::now();
+        let intensity = controls.intensity.load(Ordering::Relaxed);
         if s.output_id.is_empty() && device_check.elapsed() > Duration::from_secs(1) {
             device_check = Instant::now();
             let id = core_audio::default_id(1)?;
@@ -254,6 +288,7 @@ fn run_system(
                 (min, max, step) = ep.range()?;
                 engaged = false;
                 last_packet = Instant::now();
+                has_packet = false;
                 log::info!("Following new default output: {}", ep.id);
             }
         }
@@ -266,26 +301,33 @@ fn run_system(
                 }
                 measured = true;
                 last_packet = Instant::now();
+                has_packet = true;
             }
         }
         let peak = ep.peak()?;
         let muted = ep.muted()?;
-        let fallback = capture.is_none()
-            || (last_packet.elapsed() > Duration::from_millis(250) && peak > 0.001);
-        let (rms, level, may_boost) = if fallback {
+        let packet_age = last_packet.elapsed();
+        let fallback = uses_peak_fallback(capture.is_some(), packet_age, peak);
+        let source = measurement_source(capture.is_some(), has_packet, packet_age, fallback);
+        let (rms, level, may_boost, returning) = if fallback {
             let rms = peak as f64 / std::f64::consts::SQRT_2;
             leveler.update_with_intensity(
                 rms,
                 dt,
                 controls.target.load(Ordering::Relaxed),
                 controls.speed.load(Ordering::Relaxed),
-                controls.intensity.load(Ordering::Relaxed),
+                intensity,
             );
-            (rms, leveler.level, true)
+            (rms, leveler.level, true, false)
         } else if let Some(d) = detector.as_ref() {
-            (d.rms, d.programme.level, d.programme.may_boost())
+            (
+                d.rms,
+                d.programme.level,
+                d.programme.may_boost(),
+                d.programme.recovering_after_pause(),
+            )
         } else {
-            (0., 0., false)
+            (0., 0., false, false)
         };
         let active = (measured || fallback) && rms > 0.001;
         if active {
@@ -328,17 +370,18 @@ fn run_system(
                 let gain = if fallback {
                     leveler.correction
                 } else {
-                    leveler.update_measured_with_intensity(
+                    leveler.update_measured_with_intensity_after_pause(
                         level,
                         rms,
                         may_boost,
+                        returning,
                         dt,
                         target,
                         controls.speed.load(Ordering::Relaxed),
-                        controls.intensity.load(Ordering::Relaxed),
+                        intensity,
                     )
                 };
-                let guard = dsp::target_db(target) + 3. - dsp::db(rms);
+                let guard = dsp::target_db(target) + dsp::dynamic_headroom_db(intensity) - dsp::db(rms);
                 guarded = gain > guard + 0.25;
                 let desired = gain.min(guard);
                 at_ceiling = leveler.wanted > 0.25;
@@ -370,6 +413,7 @@ fn run_system(
                 muted,
                 silent,
                 reference: dsp::amplitude(100) as f32,
+                source,
             },
         );
         if last_debug.elapsed() > Duration::from_secs(5) {
@@ -459,6 +503,7 @@ fn run_full(
     let _ = events.send(AudioEvent::Started);
     let clock = Instant::now();
     let mut last_packet = 0.0;
+    let mut has_packet = false;
     let mut last_audio = 0.0;
     let mut last_silence = 0.0;
     let mut last_debug = 0.0;
@@ -488,6 +533,7 @@ fn run_full(
             dsp.process(&mut input, controls.dsp_config());
             queue.add(&input, channels);
             last_packet = clock.elapsed().as_secs_f64();
+            has_packet = true;
             if dsp.meters.input > 0.001 {
                 last_audio = last_packet;
             }
@@ -532,6 +578,12 @@ fn run_full(
                 muted,
                 silent,
                 reference: 0.0,
+                source: measurement_source(
+                    true,
+                    has_packet,
+                    Duration::from_secs_f64(now - last_packet),
+                    false,
+                ),
             },
         );
         if now - last_debug > 5.0 {
@@ -542,4 +594,40 @@ fn run_full(
     }
     recovery.restore()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+
+    fn classify(capture: bool, packet: bool, age_ms: u64, peak: f32) -> MeasurementSource {
+        let age = Duration::from_millis(age_ms);
+        measurement_source(capture, packet, age, uses_peak_fallback(capture, age, peak))
+    }
+
+    #[test]
+    fn windows_capture_source_transitions() {
+        assert_eq!(classify(false, false, 0, 0.0), MeasurementSource::PeakEstimate);
+        assert_eq!(classify(true, false, 0, 0.0), MeasurementSource::Unavailable);
+        assert_eq!(classify(true, false, 250, 0.5), MeasurementSource::Unavailable);
+        assert_eq!(classify(true, true, 0, 0.0), MeasurementSource::Sampled);
+        assert_eq!(classify(true, true, 250, 0.0), MeasurementSource::Sampled);
+        assert_eq!(classify(true, true, 251, 0.001), MeasurementSource::Unavailable);
+        assert_eq!(classify(true, true, 251, 0.0011), MeasurementSource::PeakEstimate);
+        assert_eq!(classify(true, true, 0, 0.0), MeasurementSource::Sampled);
+    }
+
+    #[test]
+    fn silence_mute_and_reset_do_not_change_source_meaning() {
+        let silent_sample = AudioSnapshot {
+            silent: true,
+            muted: true,
+            source: classify(true, true, 0, 0.0),
+            ..Default::default()
+        };
+        assert_eq!(silent_sample.source, MeasurementSource::Sampled);
+        assert!(silent_sample.silent && silent_sample.muted);
+        assert_eq!(AudioSnapshot::default().source, MeasurementSource::Unavailable);
+        assert_eq!(classify(true, false, 0, 0.0), MeasurementSource::Unavailable);
+    }
 }

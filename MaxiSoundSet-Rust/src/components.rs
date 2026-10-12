@@ -1,27 +1,14 @@
-use crate::{core_audio, settings};
-use anyhow::{Context, Result};
+use crate::{cable_evidence, settings};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+
 use std::{
     fs,
-    io::{Read, Write},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
     thread,
     time::Duration,
 };
-use windows::{
-    core::PCWSTR,
-    Win32::{
-        Foundation::{CloseHandle, HANDLE, WAIT_TIMEOUT},
-        System::Threading::{GetExitCodeProcess, WaitForSingleObject},
-        UI::{
-            Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW},
-            WindowsAndMessaging::SW_SHOWNORMAL,
-        },
-    },
-};
-
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub struct PackageState {
     pub latest: u32,
@@ -32,8 +19,28 @@ pub enum Event {
     Metadata(PackageState),
     Progress(f32),
     Message(String),
+    CheckFinished { installed: bool, outcome: CheckOutcome },
     Done(bool),
+    Downloaded,
     Error(String),
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckOutcome {
+    NotInstalled,
+    NewerAvailable,
+    NoNewer,
+    InstalledVersionUnknown,
+}
+fn check_outcome(state: &PackageState, is_installed: bool) -> CheckOutcome {
+    if !is_installed {
+        CheckOutcome::NotInstalled
+    } else if state.confirmed_pack == 0 {
+        CheckOutcome::InstalledVersionUnknown
+    } else if state.latest > state.confirmed_pack {
+        CheckOutcome::NewerAvailable
+    } else {
+        CheckOutcome::NoNewer
+    }
 }
 pub struct Manager {
     rx: Receiver<Event>,
@@ -56,6 +63,9 @@ impl Manager {
         }
     }
     pub fn start(&mut self, data: PathBuf, install: bool) {
+        self.start_action(data, install, false);
+    }
+    pub fn start_action(&mut self, data: PathBuf, install: bool, force_download: bool) {
         if self.busy {
             return;
         }
@@ -63,24 +73,45 @@ impl Manager {
         let tx = self.tx.clone();
         let previous = self.state.clone();
         thread::spawn(move || {
-            let result = (|| -> Result<bool> {
+            let result = (|| -> Result<Option<bool>> {
                 let mut state = previous;
-                state.latest = latest_pack()?;
+                if !install && !force_download { state.latest = latest_pack()?; }
                 let _ = tx.send(Event::Metadata(state.clone()));
                 log::info!("Official VB-CABLE latest package: {}", state.latest);
-                if !install {
+                if !install && !force_download {
                     settings::write_json(&data.join("components.json"), &state)?;
-                    return installed();
+                    let found = installed()?;
+                    let _ = tx.send(Event::CheckFinished {
+                        installed: found,
+                        outcome: check_outcome(&state, found),
+                    });
+                    return Ok(None);
                 }
-                let installed_before = installed()?;
-                let (installer, hash) = download_package(&data, state.latest, &tx)?;
-                state.sha256 = hash;
+
+                let acquired = crate::official_cable::acquire_package(&data, force_download, |p| { let _ = tx.send(Event::Progress(p)); })?;
+                let _ = tx.send(Event::Message(if acquired.reused { "Using the verified saved VB-CABLE package." } else { "The official VB-CABLE package was downloaded and verified." }.into()));
+                let selected_pack = acquired.pack;
+                if !acquired.reused { state.latest = selected_pack; }
+                let installer = acquired.installer;
+                let hash = acquired.hash;
+                if force_download {
+                    settings::write_json(&data.join("components.json"), &state)?;
+                    let _ = tx.send(Event::Metadata(state));
+                    let _ = tx.send(Event::Downloaded);
+                    return Ok(None);
+                }
+                state.sha256 = hash.clone();
+                let before = cable_evidence::observe_native();
+                let prior = cable_evidence::read_record(&data);
+                let mut evidence = cable_evidence::InstallRecord::pending_with_prior(before.clone(), hash, prior.as_ref());
+                settings::write_json(&data.join(cable_evidence::RECORD_FILE), &evidence)?;
                 let _ = tx.send(Event::Message("Windows will request administrator access for the official VB-CABLE installer. Installing a new driver may require a restart.".into()));
                 log::info!(
                     "Launching official VB-CABLE installer: {}",
                     installer.display()
                 );
-                launch_installer(&installer)?;
+                let exit_code = launch_installer(&installer)?;
+                evidence.official_exit = Some(exit_code);
                 let mut detected = false;
                 for _ in 0..15 {
                     detected = installed()?;
@@ -90,18 +121,19 @@ impl Manager {
                     thread::sleep(Duration::from_secs(1));
                 }
                 // A detected endpoint alone cannot prove that an existing driver was updated.
-                if detected && !installed_before {
-                    state.confirmed_pack = state.latest;
+                evidence.after = cable_evidence::observe_native();
+                settings::write_json(&data.join(cable_evidence::RECORD_FILE), &evidence)?;
+                if detected && before == cable_evidence::Observation::Absent {
+                    state.confirmed_pack = selected_pack;
                 }
                 settings::write_json(&data.join("components.json"), &state)?;
                 let _ = tx.send(Event::Metadata(state));
                 let _ = tx.send(Event::Message(if detected { "VB-CABLE is available. Select Full boost and your playback device." } else { "Installer finished; VB-CABLE is not available yet. Restart Windows, then refresh devices. Check Log if it remains absent." }.into()));
-                Ok(detected)
+                Ok(Some(detected))
             })();
             match result {
-                Ok(found) => {
-                    let _ = tx.send(Event::Done(found));
-                }
+                Ok(Some(found)) => { let _ = tx.send(Event::Done(found)); }
+                Ok(None) => {}
                 Err(e) => {
                     log::error!("Audio components: {e:#}");
                     let _ = tx.send(Event::Error(format!("{e:#}")));
@@ -114,7 +146,7 @@ impl Manager {
         for e in &events {
             match e {
                 Event::Metadata(s) => self.state = s.clone(),
-                Event::Done(_) | Event::Error(_) => self.busy = false,
+                Event::CheckFinished { .. } | Event::Done(_) | Event::Downloaded | Event::Error(_) => self.busy = false,
                 _ => (),
             }
         }
@@ -122,179 +154,17 @@ impl Manager {
     }
 }
 pub fn installed() -> Result<bool> {
-    Ok(core_audio::devices()?
-        .iter()
-        .any(|d| d.name.to_ascii_lowercase().contains("cable input")))
+    let inventory = cable_evidence::native_active_inventory()?;
+    if inventory.endpoints.iter().any(|e| e.active && cable_evidence::is_vb_cable_interface(&e.interface)) { return Ok(true); }
+    anyhow::ensure!(!inventory.enumeration_failed, "VB-CABLE endpoint availability could not be determined");
+    Ok(false)
 }
-pub fn latest_pack() -> Result<u32> {
-    let client = client()?;
-    let html = client
-        .get("https://vb-audio.com/Cable/")
-        .send()?
-        .error_for_status()?
-        .take(2_000_000)
-        .bytes()
-        .collect::<std::io::Result<Vec<_>>>()?;
-    let html = String::from_utf8_lossy(&html);
-    let re = regex::Regex::new(
-        r"https://download\.vb-audio\.com/Download_CABLE/VBCABLE_Driver_Pack(\d+)\.zip",
-    )?;
-    re.captures_iter(&html)
-        .filter_map(|c| c[1].parse::<u32>().ok())
-        .max()
-        .context("Official download link was not found. Open the VB-Audio website from Components.")
-}
-fn client() -> Result<reqwest::blocking::Client> {
-    Ok(reqwest::blocking::Client::builder()
-        .https_only(true)
-        .timeout(Duration::from_secs(120))
-        .user_agent(concat!("MaxiSoundSet/", env!("CARGO_PKG_VERSION")))
-        .redirect(reqwest::redirect::Policy::custom(|a| {
-            if a.url().scheme() == "https"
-                && a.url()
-                    .host_str()
-                    .is_some_and(|h| h == "vb-audio.com" || h == "download.vb-audio.com")
-                && a.previous().len() < 5
-            {
-                a.follow()
-            } else {
-                a.stop()
-            }
-        }))
-        .build()?)
-}
+pub fn latest_pack() -> Result<u32> { crate::official_cable::latest_pack() }
 fn download_package(data: &Path, pack: u32, tx: &Sender<Event>) -> Result<(PathBuf, String)> {
-    let folder = data.join("Downloads").join(format!("VB-CABLE-Pack{pack}"));
-    fs::create_dir_all(&folder)?;
-    let url = format!("https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack{pack}.zip");
-    let _ = tx.send(Event::Message(
-        "Downloading the official VB-CABLE package over verified HTTPS…".into(),
-    ));
-    let mut response = client()?.get(&url).send()?.error_for_status()?;
-    let size = response.content_length().unwrap_or(1_500_000);
-    anyhow::ensure!(size <= 30_000_000, "Package exceeds download limit");
-    let mut bytes = Vec::new();
-    let mut block = [0u8; 32768];
-    loop {
-        let n = response.read(&mut block)?;
-        if n == 0 {
-            break;
-        }
-        bytes.extend_from_slice(&block[..n]);
-        anyhow::ensure!(bytes.len() <= 30_000_000, "Package exceeds download limit");
-        let _ = tx.send(Event::Progress((bytes.len() as f32 / size as f32).min(1.0)));
-    }
-    let hash = format!("{:x}", Sha256::digest(&bytes));
-    log::info!(
-        "Downloaded VB-CABLE Pack{pack}: {} bytes, SHA256={hash}",
-        bytes.len()
-    );
-    fs::write(folder.join("official-package.zip"), &bytes)?;
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
-    anyhow::ensure!(archive.len() <= 100, "Too many package entries");
-    let mut expanded = 0u64;
-    for i in 0..archive.len() {
-        let mut entry = archive.by_index(i)?;
-        let name = entry
-            .enclosed_name()
-            .context("Unsafe path in downloaded package")?;
-        expanded += entry.size();
-        anyhow::ensure!(expanded <= 100_000_000, "Expanded package is too large");
-        let path = folder.join(name);
-        if entry.is_dir() {
-            fs::create_dir_all(path)?;
-        } else {
-            if let Some(p) = path.parent() {
-                fs::create_dir_all(p)?;
-            }
-            let mut f = fs::File::create(path)?;
-            std::io::copy(&mut entry, &mut f)?;
-            f.flush()?;
-        }
-    }
-    let installer = folder.join("VBCABLE_Setup_x64.exe");
-    anyhow::ensure!(installer.is_file(), "Official x64 installer is missing");
-    verify_signature(&installer)?;
-    log::info!("Official installer Authenticode signature verified");
-    Ok((installer, hash))
+    let _ = tx.send(Event::Message("Downloading the official VB-CABLE package over verified HTTPS…".into()));
+    crate::official_cable::download_package(data, pack, |p| {let _ = tx.send(Event::Progress(p));})
 }
-struct Process(HANDLE);
-impl Drop for Process {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = CloseHandle(self.0);
-        }
-    }
-}
-fn verify_signature(path: &Path) -> Result<()> {
-    use windows::Win32::{Foundation::HWND, Security::WinTrust::*};
-    let name = core_audio::wide(&path.to_string_lossy());
-    let mut file = WINTRUST_FILE_INFO {
-        cbStruct: std::mem::size_of::<WINTRUST_FILE_INFO>() as u32,
-        pcwszFilePath: PCWSTR(name.as_ptr()),
-        ..Default::default()
-    };
-    let mut data = WINTRUST_DATA {
-        cbStruct: std::mem::size_of::<WINTRUST_DATA>() as u32,
-        dwUIChoice: WTD_UI_NONE,
-        fdwRevocationChecks: WTD_REVOKE_NONE,
-        dwUnionChoice: WTD_CHOICE_FILE,
-        dwStateAction: WTD_STATEACTION_VERIFY,
-        Anonymous: WINTRUST_DATA_0 { pFile: &mut file },
-        ..Default::default()
-    };
-    let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
-    let status = unsafe {
-        WinVerifyTrust(
-            HWND(std::ptr::null_mut()),
-            &mut action,
-            (&mut data as *mut WINTRUST_DATA).cast(),
-        )
-    };
-    data.dwStateAction = WTD_STATEACTION_CLOSE;
-    unsafe {
-        WinVerifyTrust(
-            HWND(std::ptr::null_mut()),
-            &mut action,
-            (&mut data as *mut WINTRUST_DATA).cast(),
-        );
-    }
-    anyhow::ensure!(
-        status == 0,
-        "Installer signature validation failed (0x{:08X}). Open the official website.",
-        status as u32
-    );
-    Ok(())
-}
-fn launch_installer(path: &Path) -> Result<()> {
-    let file = core_audio::wide(&path.to_string_lossy());
-    let verb = core_audio::wide("runas");
-    let cwd = core_audio::wide(&path.parent().unwrap().to_string_lossy());
-    let mut info = SHELLEXECUTEINFOW {
-        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
-        fMask: SEE_MASK_NOCLOSEPROCESS,
-        lpVerb: PCWSTR(verb.as_ptr()),
-        lpFile: PCWSTR(file.as_ptr()),
-        lpParameters: PCWSTR::null(),
-        lpDirectory: PCWSTR(cwd.as_ptr()),
-        nShow: SW_SHOWNORMAL.0,
-        ..Default::default()
-    };
-    unsafe {
-        ShellExecuteExW(&mut info).context("Installer was cancelled or could not start")?;
-        anyhow::ensure!(
-            !info.hProcess.is_invalid(),
-            "Installer process handle unavailable"
-        );
-        let process = Process(info.hProcess);
-        while WaitForSingleObject(process.0, 500) == WAIT_TIMEOUT {}
-        let mut code = 0;
-        GetExitCodeProcess(process.0, &mut code)?;
-        log::info!("VB-CABLE installer exit code: {code}");
-        anyhow::ensure!(code == 0 || code == 3010, "VB-CABLE installer returned {code}. Restart Windows or open the official installer manually.");
-    }
-    Ok(())
-}
+fn launch_installer(path: &Path) -> Result<u32> {crate::official_cable::launch_installer(path)}
 pub fn check_download(data: &Path) -> Result<String> {
     let pack = latest_pack()?;
     let (tx, _) = mpsc::channel();
@@ -303,4 +173,38 @@ pub fn check_download(data: &Path) -> Result<String> {
         "Official Pack{pack}; installer={}; SHA256={hash}; elevated installer was NOT launched",
         installer.display()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_classifies_only_confirmed_installed_packages() {
+        let mut state = PackageState { latest: 46, confirmed_pack: 45, sha256: String::new() };
+        assert_eq!(check_outcome(&state, true), CheckOutcome::NewerAvailable);
+        state.confirmed_pack = 46;
+        assert_eq!(check_outcome(&state, true), CheckOutcome::NoNewer);
+        state.confirmed_pack = 0;
+        assert_eq!(check_outcome(&state, true), CheckOutcome::InstalledVersionUnknown);
+        state.confirmed_pack = 46;
+        assert_eq!(check_outcome(&state, false), CheckOutcome::NotInstalled);
+    }
+
+    #[test]
+    fn manager_consumes_terminal_check_and_error_events() {
+        let mut manager = Manager::new(Path::new("components-r3-synthetic-absent"));
+        manager.busy = true;
+        let state = PackageState { latest: 46, confirmed_pack: 45, sha256: String::new() };
+        manager.tx.send(Event::Metadata(state)).unwrap();
+        manager.tx.send(Event::CheckFinished { installed: true, outcome: CheckOutcome::NewerAvailable }).unwrap();
+        let events = manager.poll();
+        assert!(matches!(events.as_slice(), [Event::Metadata(_), Event::CheckFinished { .. }]));
+        assert_eq!(manager.state.latest, 46);
+        assert!(!manager.busy, "a finished check must allow retry");
+        manager.busy = true;
+        manager.tx.send(Event::Error("synthetic timeout".into())).unwrap();
+        assert!(matches!(manager.poll().as_slice(), [Event::Error(_)]));
+        assert!(!manager.busy, "a timeout must allow retry");
+    }
 }

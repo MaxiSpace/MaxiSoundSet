@@ -58,6 +58,13 @@ pub fn smooth(current: f64, desired: f64, dt: f64, speed: i32) -> f64 {
     let tau = if error < 0. { tau_down } else { tau_up };
     current + (error * (1. - (-dt / tau).exp())).clamp(-rate * dt, rate * dt)
 }
+pub fn smooth_after_pause(current: f64, desired: f64, dt: f64, speed: i32, returning: bool) -> f64 {
+    if returning && desired > current + 0.25 {
+        current + ((desired - current) * (1.0 - (-dt / 0.12).exp())).min(80.0 * dt)
+    } else {
+        smooth(current, desired, dt, speed)
+    }
+}
 /// Blend automatic correction with the original programme dynamics.
 /// 0 = High (full correction), 1 = Balanced, 2 = Low.
 pub fn steady_correction(wanted: f64, intensity: i32) -> f64 {
@@ -67,6 +74,14 @@ pub fn steady_correction(wanted: f64, intensity: i32) -> f64 {
             2 => 0.4,
             _ => 0.7,
         }
+}
+/// RMS guard headroom above the target for each steadying intensity.
+pub fn dynamic_headroom_db(intensity: i32) -> f64 {
+    match intensity {
+        0 => 3.0,
+        2 => 12.0,
+        _ => 7.0,
+    }
 }
 
 pub fn manual_gain_db(target: i32, boost_db: i32) -> f64 {
@@ -101,10 +116,11 @@ impl WindowsLeveler {
         intensity: i32,
     ) -> f64 {
         self.level = self.programme.update(rms, dt);
-        self.update_measured_with_intensity(
+        self.update_measured_with_intensity_after_pause(
             self.level,
             rms,
             self.programme.may_boost(),
+            self.programme.recovering_after_pause(),
             dt,
             target,
             speed,
@@ -133,13 +149,28 @@ impl WindowsLeveler {
         speed: i32,
         intensity: i32,
     ) -> f64 {
+        self.update_measured_with_intensity_after_pause(
+            level, rms, may_boost, false, dt, target, speed, intensity,
+        )
+    }
+    pub fn update_measured_with_intensity_after_pause(
+        &mut self,
+        level: f64,
+        rms: f64,
+        may_boost: bool,
+        returning: bool,
+        dt: f64,
+        target: i32,
+        speed: i32,
+        intensity: i32,
+    ) -> f64 {
         self.level = level;
         self.reference = amplitude(100);
         if rms > 0.001 && target > 0 {
             self.wanted = db(amplitude(target.clamp(1, 100))) - db(self.level.max(1e-10));
             let desired = steady_correction(self.wanted, intensity);
             if desired <= self.correction || may_boost {
-                self.correction = smooth(self.correction, desired, dt, speed);
+                self.correction = smooth_after_pause(self.correction, desired, dt, speed, returning);
             }
         }
         self.correction
@@ -289,7 +320,14 @@ impl Normalizer {
                 self.gain_db
             };
             self.gain_db = if config.enabled && config.leveling {
-                smooth(self.gain_db, desired, dt, config.speed).clamp(-80.0, boost)
+                smooth_after_pause(
+                    self.gain_db,
+                    desired,
+                    dt,
+                    config.speed,
+                    self.detector.programme.recovering_after_pause(),
+                )
+                .clamp(-80.0, boost)
             } else if config.enabled {
                 self.gain_db += (desired - self.gain_db) * (1.0 - (-dt / 0.06).exp());
                 self.gain_db.clamp(-80.0, boost)
@@ -344,11 +382,7 @@ impl Normalizer {
             // sustained overshoots within +3 dB; Balanced and Low intentionally
             // preserve progressively wider dynamics. Peak protection stays fixed.
             if config.enabled && config.leveling && target > 0 && self.detector.rms > 0.001 {
-                let dynamic_headroom = match config.intensity {
-                    0 => 3.0,
-                    2 => 12.0,
-                    _ => 7.0,
-                };
+                let dynamic_headroom = dynamic_headroom_db(config.intensity);
                 needed = needed.min(
                     target_amp * 10.0_f64.powf(dynamic_headroom / 20.0)
                         / (self.detector.rms * gain).max(1e-10),
@@ -699,6 +733,48 @@ mod tests {
             "Low must retain substantially more dynamics"
         );
     }
+    #[test]
+    fn shared_rms_headroom_keeps_windows_intensities_distinct_under_attenuation() {
+        assert_eq!(dynamic_headroom_db(0), 3.0);
+        assert_eq!(dynamic_headroom_db(1), 7.0);
+        assert_eq!(dynamic_headroom_db(2), 12.0);
+        assert_eq!(dynamic_headroom_db(-1), 7.0);
+        let run = |intensity| {
+            let rate = 48_000;
+            let mut detector = crate::loudness::Detector::new(rate, 1);
+            let mut output_detector = crate::loudness::Detector::new(rate, 1);
+            let mut leveler = WindowsLeveler::default();
+            let mut tail_sum = 0.0;
+            for block in 0..600 {
+                let start = block * 480;
+                let mut samples: Vec<f32> = (start..start + 480)
+                    .map(|i| (0.8 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / rate as f64).sin()) as f32)
+                    .collect();
+                let level = detector.block(&samples, rate, 1);
+                let gain = leveler.update_measured_with_intensity(
+                    level, detector.rms, detector.programme.may_boost(), 0.01, 100, 1, intensity,
+                );
+                let guard = target_db(100) + dynamic_headroom_db(intensity) - db(detector.rms);
+                let applied = gain.min(guard).clamp(-80.0, 0.0);
+                leveler.constrain(-80.0, 0.0);
+                assert!((-80.0..=0.0).contains(&applied));
+                for sample in &mut samples {
+                    *sample *= 10.0_f32.powf(applied as f32 / 20.0);
+                }
+                output_detector.block(&samples, rate, 1);
+                if block >= 500 {
+                    tail_sum += output_detector.rms;
+                }
+            }
+            tail_sum / 100.0
+        };
+        let high = run(0);
+        let balanced = run(1);
+        let low = run(2);
+        assert!((db(high) - target_db(100)).abs() < 0.6, "high={high}");
+        assert!(db(balanced / high) > 2.0, "high={high}, balanced={balanced}");
+        assert!(db(low / balanced) > 2.0, "balanced={balanced}, low={low}");
+    }
 
     #[test]
     fn manual_volume_and_boost_work_without_steadying() {
@@ -772,6 +848,64 @@ mod tests {
             p.update(0.02, 0.02, 100, 1);
         }
         assert!(p.correction > before + 0.5);
+    }
+    #[test]
+    fn sustained_pause_recovers_attenuation_without_raising_pause_noise() {
+        let config = DspConfig {
+            profile: 0,
+            boost_db: 36,
+            ..DspConfig::default()
+        };
+        let mut full = Normalizer::new(48000, 1).unwrap();
+        tone(&mut full, config, 0.8, 1.0);
+        let full_loud = full.gain_db;
+        tone(&mut full, config, 0.0001, 0.4);
+        assert!((full.gain_db - full_loud).abs() < 0.1);
+        tone(&mut full, config, 0.04, 0.2);
+        assert!(full.gain_db > full_loud + 7.0);
+        assert!(full.meters.output < 0.944);
+
+        let mut windows = WindowsLeveler::default();
+        for _ in 0..100 {
+            windows.update(0.56, 0.01, 100, 1);
+            windows.constrain(-80.0, 0.0);
+        }
+        let windows_loud = windows.correction;
+        for _ in 0..40 {
+            windows.update(0.0001, 0.01, 100, 1);
+            windows.constrain(-80.0, 0.0);
+        }
+        assert!((windows.correction - windows_loud).abs() < 0.1);
+        for _ in 0..20 {
+            windows.update(0.028, 0.01, 100, 1);
+            windows.constrain(-80.0, 0.0);
+        }
+        assert!(windows.correction > windows_loud + 7.0);
+        assert!(windows.correction <= 0.0);
+    }
+    #[test]
+    fn same_level_return_and_sustained_quiet_do_not_trigger_recovery_jump() {
+        let mut windows = WindowsLeveler::default();
+        for _ in 0..100 {
+            windows.update(0.56, 0.01, 100, 1);
+            windows.constrain(-80.0, 0.0);
+        }
+        let before = windows.correction;
+        for _ in 0..40 {
+            windows.update(0.0001, 0.01, 100, 1);
+            windows.constrain(-80.0, 0.0);
+        }
+        for _ in 0..20 {
+            windows.update(0.56, 0.01, 100, 1);
+            windows.constrain(-80.0, 0.0);
+        }
+        assert!((windows.correction - before).abs() < 0.5);
+        let mut quiet = ProgrammeLevel::default();
+        for _ in 0..100 {
+            quiet.update(0.028, 0.01);
+        }
+        assert!(!quiet.recovering_after_pause());
+        assert_eq!(smooth_after_pause(-5.0, 0.0, 0.01, 2, false), smooth(-5.0, 0.0, 0.01, 2));
     }
     #[test]
     fn sustained_burst_is_guarded_without_clipping_and_recovers_quickly() {

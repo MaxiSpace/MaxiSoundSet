@@ -1,9 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod app_log;
 mod app_update;
+mod update_handoff;
 mod audio_engine;
 mod background;
 mod components;
+mod cable_evidence;
+mod official_cable;
 mod conflicts;
 mod core_audio;
 mod dsp;
@@ -38,6 +41,8 @@ struct State {
     engine: AudioEngine,
     components: components::Manager,
     app_updates: app_update::Manager,
+    update_handoff_result: Option<std::sync::mpsc::Receiver<Result<update_handoff::HealthProbe>>>,
+    update_health: Option<update_handoff::HealthProbe>,
     outputs: Vec<String>,
     sources: Vec<String>,
     history: VecDeque<LevelPoint>,
@@ -48,6 +53,49 @@ struct State {
     unmute_target: Option<i32>,
     hotkey_errors: Vec<(usize, String)>,
     hotkey_pending_audio: Option<HotkeyPendingAudio>,
+}
+fn begin_component_check(ui: &AppWindow) {
+    ui.set_components_busy(true);
+    ui.set_components_installing(false);
+    ui.set_component_check_state(1);
+    ui.set_component_message("".into());
+    ui.set_download_progress(0.0);
+    ui.set_latest_version("".into());
+    ui.set_update_available(false);
+}
+fn finish_component_check(ui: &AppWindow, installed: bool, outcome: components::CheckOutcome) {
+    ui.set_components_busy(false);
+    ui.set_cable_installed(installed);
+    ui.set_component_check_state(match outcome {
+        components::CheckOutcome::NotInstalled => 6,
+        components::CheckOutcome::NewerAvailable => 2,
+        components::CheckOutcome::NoNewer => 3,
+        components::CheckOutcome::InstalledVersionUnknown => 4,
+    });
+}
+fn component_error(ui: &AppWindow, error: String) {
+    ui.set_components_busy(false);
+    ui.set_download_progress(0.0);
+    if ui.get_component_check_state() == 1 {
+        ui.set_component_check_state(5);
+        log::error!("VB-CABLE update check: {error}");
+    } else {
+        ui.set_components_installing(false);
+        ui.set_component_message(error.into());
+    }
+}
+fn app_update_error(ui: &AppWindow, error: &str) {
+    log::error!("Application update: {error}");
+    let kind = if error.contains("UPD_NETWORK") { 1 }
+        else if error.contains("UPD_RELEASE") { 2 }
+        else if error.contains("UPD_ASSET") { 3 }
+        else if error.contains("UPD_HASH") || error.contains("UPD_SIZE") { 4 }
+        else if error.contains("UPD_INSTALL_PATH") { 5 }
+        else if error.contains("UPD_RECOVERY") { 7 }
+        else { 6 };
+    ui.set_app_update_error_kind(kind);
+    ui.set_app_update_cancelling(false);
+    ui.set_app_update_state(4);
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum HotkeyPendingAudio { Start, Stop }
@@ -124,10 +172,23 @@ fn profile_label(profile: i32, english: bool) -> &'static str {
     const FA: [&str; 8] = ["پیش‌فرض سیستم", "ملایم", "گفتار و دیالوگ", "موسیقی", "سینما", "گرم و آرام", "تمرکز بازی", "اکولایزر سفارشی"];
     if english { EN[profile.clamp(0, 7) as usize] } else { FA[profile.clamp(0, 7) as usize] }
 }
+fn unavailable_audio_control_shortcut(ui: &AppWindow, action: usize) -> Option<(&'static str, &'static str)> {
+    if (8..=10).contains(&action) && ui.get_mode() != 1 {
+        Some(("نیازمند تغییر حالت به پردازش کابل مجازی", "Requires switching to virtual cable processing mode."))
+    } else if action == 10 && ui.get_profile() == 0 {
+        Some(("برای شنیدن اثر، یک پروفایل بهبود صدا انتخاب کن.", "Select an enhancement profile to hear treble smoothing."))
+    } else {
+        None
+    }
+}
 fn handle_hotkey(ui: &AppWindow, state: &Rc<RefCell<State>>, osd: &Rc<RefCell<Option<osd::Osd>>>, action: usize) {
     if state.borrow().exiting { return; }
     if ui.get_busy() {
         notify_action(ui, osd, "در حال اجرا", "Audio busy", "درخواست قبلی هنوز کامل نشده است.", "The previous audio action is still pending.");
+        return;
+    }
+    if let Some((detail_fa, detail_en)) = unavailable_audio_control_shortcut(ui, action) {
+        notify_action(ui, osd, "در دسترس نیست", "Unavailable", detail_fa, detail_en);
         return;
     }
     match action {
@@ -209,7 +270,6 @@ fn handle_hotkey(ui: &AppWindow, state: &Rc<RefCell<State>>, osd: &Rc<RefCell<Op
             read_config(ui, &mut state.borrow_mut());
             let profile = profile_label(ui.get_profile(), ui.get_english());
             if ui.get_profile() == 0 { notify_action(ui, osd, "بهبود صدا خاموش", "Enhancement off", profile, profile); }
-            else if ui.get_mode() == 0 { notify_action(ui, osd, "بهبود صدا ذخیره شد", "Enhancement saved", "برای اعمال، حالت بوست کامل را فعال کن.", "Switch to Full boost mode to apply it."); }
             else { notify_action(ui, osd, "بهبود صدا روشن", "Enhancement on", profile, profile); }
         }
         9 => {
@@ -220,14 +280,11 @@ fn handle_hotkey(ui: &AppWindow, state: &Rc<RefCell<State>>, osd: &Rc<RefCell<Op
             let label = profile_label(next, ui.get_english());
             let detail_fa = format!("پروفایل: {label}");
             let detail_en = format!("Profile: {label}");
-            if next != 0 && ui.get_mode() == 0 { notify_action(ui, osd, "پروفایل ذخیره شد", "Profile saved", "برای شنیدن افکت، حالت بوست کامل را فعال کن.", "Switch to Full boost mode to hear the effect."); }
-            else { notify_action(ui, osd, "پروفایل بهبود صدا", "Enhancement profile", &detail_fa, &detail_en); }
+            notify_action(ui, osd, "پروفایل بهبود صدا", "Enhancement profile", &detail_fa, &detail_en);
         }
         10 => {
-            ui.set_treble_smoothing(!ui.get_treble_smoothing()); read_config(ui, &mut state.borrow_mut());
-            if ui.get_mode() == 0 { notify_action(ui, osd, "تنظیم ذخیره شد", "Setting saved", "برای اعمال نرم‌سازی صدای زیر، حالت بوست کامل را فعال کن.", "Switch to Full boost mode to apply treble smoothing."); }
-            else if ui.get_profile() == 0 { notify_action(ui, osd, "تنظیم ذخیره شد", "Setting saved", "برای شنیدن اثر، یک پروفایل بهبود صدا انتخاب کن.", "Select an enhancement profile to hear treble smoothing."); }
-            else if ui.get_treble_smoothing() { notify_action(ui, osd, "نرم‌سازی صدای زیر روشن", "Treble smoothing on", "", ""); }
+            ui.invoke_request_treble_smoothing(!ui.get_treble_smoothing());
+            if ui.get_treble_smoothing() { notify_action(ui, osd, "نرم‌سازی صدای زیر روشن", "Treble smoothing on", "", ""); }
             else { notify_action(ui, osd, "نرم‌سازی صدای زیر خاموش", "Treble smoothing off", "", ""); }
         }
         _ => log::warn!("Unknown global shortcut action index {action}"),
@@ -294,7 +351,7 @@ fn cancel_capture(ui: &AppWindow, state: &Rc<RefCell<State>>, native: &Rc<RefCel
     ui.set_hotkey_capture_index(-1);
     sync_hotkey_rows(ui, &state.borrow());
     if index < crate::settings::HOTKEY_ACTION_COUNT {
-        ui.set_status(if ui.get_english() { "Shortcut recording cancelled." } else { "ضبط میانبر لغو شد." }.into());
+        ui.set_status(if ui.get_english() { "Shortcut recording cancelled." } else { "ضبط میان‌بر لغو شد." }.into());
     }
 }
 fn new_registration_failures(
@@ -338,7 +395,7 @@ fn apply_hotkeys(
     let Some(tray) = native_ref.as_mut() else {
         ui.set_hotkey_capture_index(-1);
         sync_hotkey_rows(ui, &state.borrow());
-        ui.set_status(if ui.get_english() { "Global shortcut window is unavailable." } else { "پنجرهٔ میانبرها در دسترس نیست." }.into());
+        ui.set_status(if ui.get_english() { "Global shortcut window is unavailable." } else { "پنجرهٔ میان‌برها در دسترس نیست." }.into());
         return false;
     };
     let errors = tray.register_hotkeys(&candidate);
@@ -357,7 +414,7 @@ fn apply_hotkeys(
         state.borrow_mut().hotkey_errors = display;
         ui.set_hotkey_capture_index(-1);
         sync_hotkey_rows(ui, &state.borrow());
-        ui.set_status(if ui.get_english() { "Shortcut was not saved because Windows could not register it. Choose a different combination." } else { "میانبر ذخیره نشد؛ ویندوز آن را ثبت نکرد. ترکیب دیگری انتخاب کن." }.into());
+        ui.set_status(if ui.get_english() { "Shortcut was not saved because Windows could not register it. Choose a different combination." } else { "میان‌بر ذخیره نشد؛ ویندوز آن را ثبت نکرد. ترکیب دیگری انتخاب کن." }.into());
         return false;
     }
     {
@@ -368,7 +425,7 @@ fn apply_hotkeys(
     }
     ui.set_hotkey_capture_index(-1);
     sync_hotkey_rows(ui, &state.borrow());
-    ui.set_status(if ui.get_english() { "Keyboard shortcuts saved." } else { "کلیدهای میانبر ذخیره شدند." }.into());
+    ui.set_status(if ui.get_english() { "Keyboard shortcuts saved." } else { "کلیدهای میان‌بر ذخیره شدند." }.into());
     true
 }
 fn open(target: &str) {
@@ -407,7 +464,7 @@ fn refresh(ui: &AppWindow, state: &mut State) -> Result<()> {
 fn apply_devices(ui: &AppWindow, state: &mut State, all: Vec<core_audio::DeviceInfo>) {
     let cable = all
         .iter()
-        .any(|d| d.name.to_ascii_lowercase().contains("cable input"));
+        .any(|d| d.vb_cable);
     let mut names = vec![if ui.get_english() {
         "System default"
     } else {
@@ -641,6 +698,7 @@ fn exit(ui: &AppWindow, state: &Rc<RefCell<State>>, osd: &Rc<RefCell<Option<osd:
     if s.components.busy {
         log::info!("Exit requested during component operation; an already launched official installer remains independent");
     }
+    s.app_updates.cancel();
     s.exiting = true;
     if let Some(window) = osd.borrow().as_ref() { window.hide(); }
     s.settings.was_running = false;
@@ -658,12 +716,190 @@ fn exit(ui: &AppWindow, state: &Rc<RefCell<State>>, osd: &Rc<RefCell<Option<osd:
         s.engine = engine;
         s.exiting = false;
         ui.set_busy(false);
-        ui.set_audio_error("Background worker is unavailable; retry Exit app.".into());
+        log::error!("Background worker is unavailable; retry Exit app.");
+        ui.set_audio_error(if ui.get_english() {
+            "Safe exit failed. Please retry Exit app."
+        } else {
+            "خروج امن انجام نشد. دوباره گزینهٔ خروج را بزنید."
+        }.into());
     }
 }
 
 fn run() -> Result<()> {
+    let preview_args: Vec<String> = std::env::args().collect();
+    let native_preview = preview_args.iter().any(|arg| arg == "--native-window-preview");
+    anyhow::ensure!(
+        !native_preview || preview_args.iter().any(|arg| arg == "--layout-preview"),
+        "--native-window-preview requires --layout-preview"
+    );
+    // Synthetic preview returns before production services and personal settings.
+    if preview_args.iter().any(|arg| arg == "--layout-preview") {
+        let ui = AppWindow::new()?;
+        ui.set_app_version(env!("CARGO_PKG_VERSION").into());
+        window_repaint::install_focus_reveal(&ui);
+        let preview_value = |flag: &str| preview_args.iter().position(|arg| arg == flag).and_then(|index| preview_args.get(index + 1));
+        anyhow::ensure!(
+            !native_preview || preview_value("--capture-dir").is_none(),
+            "--native-window-preview is for interactive --layout-preview"
+        );
+        ui.set_english(preview_value("--lang").is_some_and(|lang| lang == "en"));
+        if let Some(page) = preview_value("--page").and_then(|v| v.parse::<i32>().ok()) { ui.set_page(page.clamp(0, 6)); }
+        if let (Some(width), Some(height)) = (preview_value("--width").and_then(|v| v.parse::<f32>().ok()), preview_value("--height").and_then(|v| v.parse::<f32>().ok())) { window_repaint::resize_logically(ui.window(), width.max(640.), height.max(320.)); }
+        ui.set_devices_ready(true);
+        ui.set_recovery_ready(true);
+        ui.set_mode(1);
+        ui.set_profile(7);
+        ui.set_eq_bands(Rc::new(VecModel::from(["31", "62", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"].into_iter().map(|frequency| EqBand { frequency: frequency.into(), gain: 0. }).collect::<Vec<_>>())).into());
+        ui.set_outputs(Rc::new(VecModel::from(vec![slint::SharedString::from("Speakers (High Definition Audio Device)")])).into());
+        ui.set_sources(Rc::new(VecModel::from(vec![slint::SharedString::from("CABLE Output (VB-Audio Virtual Cable)")])).into());
+        ui.set_hotkey_rows(Rc::new(VecModel::from((0..8).map(|i| HotkeyRow { name: format!("Shortcut {i} / میان‌بر صدا").into(), chord: "Ctrl + Alt + F12".into(), enabled: true, error: "".into() }).collect::<Vec<_>>())).into());
+        ui.on_exit_app(|| { let _ = slint::quit_event_loop(); });
+        if preview_args.iter().any(|arg| arg == "--app-update-preview") {
+            // Isolated visual fixture: this early-return branch never starts update,
+            // settings, audio, registry, or network workers.
+            ui.set_page(6);
+            ui.set_app_latest_version("v1.0.4".into());
+            ui.set_app_update_installable(true);
+            ui.on_open_app_release_notes(|| {});
+            ui.set_app_update_state(preview_value("--update-state").and_then(|v| v.parse::<i32>().ok()).unwrap_or(3).clamp(0, 11));
+            ui.set_app_release_notes_ready(![0, 1, 4].contains(&ui.get_app_update_state()));
+            ui.set_app_update_error_kind(preview_value("--update-error").and_then(|v| v.parse::<i32>().ok()).unwrap_or(1).clamp(0, 7));
+            ui.set_app_update_progress(0.42);
+            let weak = ui.as_weak();
+            ui.on_check_app_update(move || { if let Some(ui) = weak.upgrade() { ui.set_app_update_state(3); ui.set_app_release_notes_ready(true); ui.set_app_update_cancelling(false); } });
+            let weak = ui.as_weak();
+            ui.on_install_app_update(move || { if let Some(ui) = weak.upgrade() { ui.set_app_update_state(5); ui.set_app_update_cancelling(false); } });
+            let weak = ui.as_weak();
+            ui.on_cancel_app_update(move || { if let Some(ui) = weak.upgrade() { ui.set_app_update_state(8); ui.set_app_update_progress(0.0); } });
+        }
+        if let Some(directory) = preview_value("--update-capture-dir") {
+            anyhow::ensure!(preview_args.iter().any(|arg| arg == "--app-update-preview"), "Update captures require the isolated update preview");
+            let directory = PathBuf::from(directory);
+            fs::create_dir_all(&directory)?;
+            let cases = [(3, 0, false), (5, 0, false), (5, 0, true), (8, 0, false), (2, 0, false), (4, 3, false), (4, 4, false), (4, 5, false), (4, 7, false), (7, 0, false), (9, 0, false), (10, 0, false), (11, 0, false)];
+            let step = Rc::new(std::cell::Cell::new(0usize));
+            let capture_error = Rc::new(RefCell::new(None));
+            let timer_error = capture_error.clone();
+            let weak = ui.as_weak();
+            let capture_timer = slint::Timer::default();
+            capture_timer.start(slint::TimerMode::Repeated, Duration::from_millis(250), move || {
+                let Some(ui) = weak.upgrade() else { return; };
+                let index = step.get();
+                if index > 0 {
+                    let previous = index - 1;
+                    let (state, error, cancelling) = cases[previous % cases.len()];
+                    let language = if previous < cases.len() { "fa" } else { "en" };
+                    let name = format!("{language}-state-{state}-error-{error}-cancel-{cancelling}.png");
+                    if let Err(error) = snapshot_png(&ui, &directory.join(name)) { *timer_error.borrow_mut() = Some(error); let _ = slint::quit_event_loop(); return; }
+                }
+                if index == cases.len() * 2 { let _ = slint::quit_event_loop(); return; }
+                let (state, error, cancelling) = cases[index % cases.len()];
+                ui.set_english(index >= cases.len());
+                ui.set_app_update_state(state);
+                ui.set_app_release_notes_ready(![0, 1, 4].contains(&state));
+                ui.set_app_update_error_kind(error);
+                ui.set_app_update_cancelling(cancelling);
+                ui.set_app_update_progress(if state == 5 { 0.42 } else { 0.0 });
+                ui.set_app_update_installable(![2, 9, 10, 11].contains(&state));
+                step.set(index + 1);
+            });
+            ui.show()?;
+            window_repaint::after_show(&ui);
+            slint::run_event_loop()?;
+            if let Some(error) = capture_error.borrow_mut().take() { return Err(error); }
+            return Ok(());
+        }
+        if let Some(directory) = preview_value("--capture-dir") {
+            let directory = PathBuf::from(directory);
+            fs::create_dir_all(&directory)?;
+            ui.set_logs(Rc::new(VecModel::from(vec![LogRow { time: "12:34:56".into(), level: "INFO".into(), message: "Synthetic preview event / رویداد آزمایشی".into() }])).into());
+            let weak = ui.as_weak();
+            let capture_timer = slint::Timer::default();
+            let step = Rc::new(std::cell::Cell::new(0usize));
+            let capture_error = Rc::new(RefCell::new(None));
+            let timer_error = capture_error.clone();
+            capture_timer.start(slint::TimerMode::Repeated, Duration::from_millis(500), move || {
+                let Some(ui) = weak.upgrade() else { return; };
+                let index = step.get();
+                // Preserve the original five captures and add reachable small-window evidence.
+                let cases = [(0, true, false, 0.), (0, false, false, 0.), (2, true, false, 0.), (4, true, false, 0.), (6, true, false, 0.), (0, true, true, 0.), (0, false, true, 0.), (4, true, false, 200.), (4, true, false, 400.)];
+                if index > 0 {
+                    let (_, _, sidebar_end, settings_offset) = cases[index - 1];
+                    if sidebar_end { ui.invoke_scroll_sidebar_to_end(); }
+                    ui.invoke_scroll_settings_to(settings_offset);
+                    if let Err(error) = snapshot_png(&ui, &directory.join(format!("preview-{}.png", index - 1))) {
+                        *timer_error.borrow_mut() = Some(error);
+                        let _ = slint::quit_event_loop();
+                        return;
+                    }
+                }
+                if index < cases.len() {
+                    let (page, expanded, _, _) = cases[index];
+                    ui.set_page(page);
+                    ui.set_sidebar_expanded(expanded);
+                }
+                if index == cases.len() { let _ = slint::quit_event_loop(); }
+                step.set(index + 1);
+            });
+            ui.show()?;
+            window_repaint::after_show(&ui);
+            slint::run_event_loop()?;
+            if let Some(error) = capture_error.borrow_mut().take() { return Err(error); }
+            return Ok(());
+        }
+        let weak = ui.as_weak();
+        ui.on_eq_band_changed(move |index, gain| { if let Some(ui) = weak.upgrade() { let model = ui.get_eq_bands(); if let Some(mut band) = model.row_data(index as usize) { band.gain = gain; model.set_row_data(index as usize, band); } } });
+        ui.show()?;
+        window_repaint::after_show(&ui);
+        if preview_args.iter().any(|arg| arg == "--menu") { ui.invoke_toggle_sidebar(); }
+        // Install the same native window notification subclass as production,
+        // once Winit has created its HWND. Keep only window lifecycle actions.
+        let preview_tray: Rc<RefCell<Option<native_tray::Tray>>> = Rc::new(RefCell::new(None));
+        let preview_error: Rc<RefCell<Option<anyhow::Error>>> = Rc::new(RefCell::new(None));
+        let preview_timer = slint::Timer::default();
+        if native_preview {
+            let weak = ui.as_weak();
+            let tray = preview_tray.clone();
+            let error = preview_error.clone();
+            preview_timer.start(slint::TimerMode::Repeated, Duration::from_millis(100), move || {
+                let Some(ui) = weak.upgrade() else { return; };
+                if tray.borrow().is_none() {
+                    match native_tray::Tray::new() {
+                        Ok(value) => { *tray.borrow_mut() = Some(value); }
+                        Err(e) => {
+                            *error.borrow_mut() = Some(e);
+                            let _ = slint::quit_event_loop();
+                            return;
+                        }
+                    }
+                }
+                let actions: Vec<_> = tray.borrow().as_ref()
+                    .and_then(|value| value.events.as_ref())
+                    .map(|events| events.try_iter().collect()).unwrap_or_default();
+                for action in actions {
+                    match action {
+                        native_tray::Action::Show => show(&ui),
+                        native_tray::Action::Repaint => {
+                            if ui.window().is_visible() { window_repaint::full_redraw(ui.window()); }
+                        }
+                        native_tray::Action::FitWindow => {
+                            if ui.window().is_visible() { window_repaint::fit_native_work_area(); }
+                        }
+                        native_tray::Action::Exit => { ui.invoke_exit_app(); return; }
+                        _ => {} // Preview never dispatches audio, settings, or shortcut actions.
+                    }
+                }
+            });
+        }
+        let result = slint::run_event_loop();
+        preview_timer.stop();
+        preview_tray.borrow_mut().take();
+        if let Some(error) = preview_error.borrow_mut().take() { return Err(error); }
+        result?;
+        return Ok(());
+    }
     let args: Vec<_> = std::env::args().collect();
+    let update_health = update_handoff::HealthProbe::from_args(&args, env!("CARGO_PKG_VERSION"))?;
     if args.get(1).is_some_and(|arg| matches!(arg.as_str(), "--ui-smoke" | "--startup-instance-idle-smoke")) {
         // Keep the diagnostic harness from opening a blocking Windows crash dialog.
         #[link(name = "kernel32")]
@@ -750,6 +986,7 @@ fn run() -> Result<()> {
         return Ok(());
     }
     let ui = AppWindow::new()?;
+    window_repaint::install_focus_reveal(&ui);
     set_eq_model(&ui, settings.eq_bands);
     ui.set_target(settings.default_volume);
     ui.set_default_volume(settings.default_volume);
@@ -776,6 +1013,11 @@ fn run() -> Result<()> {
     ui.set_debug_log(settings.debug_log);
     ui.set_english(settings.english);
     ui.set_log_folder(data.join("Logs").display().to_string().into());
+    if update_health.is_some() {
+        // Keep the upgrade outcome visible after the new or restored app starts.
+        ui.set_page(6);
+        ui.set_app_update_state(7);
+    }
     let state = Rc::new(RefCell::new(State {
         background: background::Background::new(),
         devices_pending: true,
@@ -783,6 +1025,8 @@ fn run() -> Result<()> {
         exiting: false,
         components: components::Manager::new(&data),
         app_updates: app_update::Manager::new(),
+        update_handoff_result: None,
+        update_health,
         settings,
         data: data.clone(),
         engine: AudioEngine::new(),
@@ -972,6 +1216,7 @@ fn run() -> Result<()> {
         ui.on_install_components(move || {
             if let Some(u) = w.upgrade() {
                 let mut s = s.borrow_mut();
+                if s.components.busy { return; }
                 if u.get_running() || u.get_busy() {
                     u.set_status("Stop audio before installing or updating a driver.".into());
                     return;
@@ -979,7 +1224,27 @@ fn run() -> Result<()> {
                 let data = s.data.clone();
                 s.components.start(data, true);
                 u.set_components_busy(true);
+                u.set_component_check_state(0);
+                u.set_components_installing(true);
+                u.set_component_message("".into());
                 u.set_download_progress(0.0);
+            }
+        });
+    }
+    {
+        let w = ui.as_weak();
+        let s = state.clone();
+        ui.on_download_components_again(move || {
+            if let Some(u) = w.upgrade() {
+                let mut s = s.borrow_mut();
+                if s.components.busy || u.get_running() || u.get_busy() { return; }
+                let data = s.data.clone();
+                s.components.start_action(data, false, true);
+                u.set_components_busy(true);
+                u.set_components_installing(true);
+                u.set_component_check_state(0);
+                u.set_download_progress(0.0);
+                u.set_component_message(if u.get_english() { "Downloading a fresh official package; setup will not launch." } else { "در حال دریافت دوبارهٔ بستهٔ رسمی؛ نصاب اجرا نمی‌شود." }.into());
             }
         });
     }
@@ -989,10 +1254,10 @@ fn run() -> Result<()> {
         ui.on_check_updates(move || {
             if let Some(u) = w.upgrade() {
                 let mut s = s.borrow_mut();
+                if s.components.busy { return; }
                 let data = s.data.clone();
                 s.components.start(data, false);
-                u.set_components_busy(true);
-                u.set_component_message("Checking the official VB-Audio website…".into());
+                begin_component_check(&u);
             }
         });
     }
@@ -1008,6 +1273,7 @@ fn run() -> Result<()> {
         if [
             "https://vb-audio.com/Cable/",
             "https://slint.dev",
+            "https://www.rust-lang.org/",
             "https://MaxiSpace.dev/",
             "https://maxispace.dev/donate",
             "https://github.com/MaxiSpace/MaxiSoundSet/issues",
@@ -1031,19 +1297,65 @@ fn run() -> Result<()> {
     {
         let w = ui.as_weak();
         let s = state.clone();
+        ui.on_open_app_release_notes(move || {
+            let Some(u) = w.upgrade() else { return; };
+            if smoke || !u.get_app_release_notes_ready() { return; }
+            if let Some(url) = s.borrow().app_updates.release_notes_url() { open(&url); }
+        });
+    }
+    {
+        let w = ui.as_weak();
+        let s = state.clone();
         ui.on_check_app_update(move || {
             if let Some(u) = w.upgrade() {
                 if smoke {
                     u.set_app_update_state(2);
-                    u.set_app_latest_version("v1.0.2".into());
+                    u.set_app_latest_version(format!("v{}", env!("CARGO_PKG_VERSION")).into());
                     return;
                 }
                 let mut s = s.borrow_mut();
-                if !s.app_updates.busy {
+                if !s.exiting && !s.app_updates.busy && s.update_handoff_result.is_none() && u.get_app_update_state() != 7 {
                     s.app_updates.start(env!("CARGO_PKG_VERSION"));
                     u.set_app_update_state(1);
                     u.set_app_latest_version("".into());
+                    u.set_app_update_progress(0.0);
+                    u.set_app_update_installable(false);
+                    u.set_app_release_notes_ready(false);
+                    u.set_app_update_cancelling(false);
                 }
+            }
+        });
+    }
+    {
+        let w = ui.as_weak();
+        let s = state.clone();
+        ui.on_install_app_update(move || {
+            let Some(u) = w.upgrade() else { return; };
+            let mut s = s.borrow_mut();
+            if smoke || s.exiting || s.app_updates.busy || s.update_handoff_result.is_some() || !u.get_app_update_installable() || u.get_app_update_state() == 7 { return; }
+            if !u.get_recovery_ready() || !u.get_devices_ready() || s.error.is_some() || s.components.busy {
+                app_update_error(&u, "UPD_RECOVERY: audio initialization or recovery is not ready");
+                return;
+            }
+            match s.app_updates.download() {
+                Ok(()) => {
+                    u.set_app_update_progress(0.0);
+                    u.set_app_update_cancelling(false);
+                    u.set_app_update_state(5);
+                }
+                Err(error) => app_update_error(&u, &format!("{error:#}")),
+            }
+        });
+    }
+    {
+        let w = ui.as_weak();
+        let s = state.clone();
+        ui.on_cancel_app_update(move || {
+            let Some(u) = w.upgrade() else { return; };
+            let mut s = s.borrow_mut();
+            if s.app_updates.busy && s.update_handoff_result.is_none() && u.get_app_update_state() != 7 {
+                s.app_updates.cancel();
+                u.set_app_update_cancelling(true);
             }
         });
     }
@@ -1064,7 +1376,7 @@ fn run() -> Result<()> {
         .borrow()
         .background
         .submit(background::Job::Initialize(data.clone()))?;
-    if !smoke && !startup_probe_mode {
+    if !smoke && !startup_probe_mode && state.borrow().update_health.is_none() {
         state.borrow().background.submit(background::Job::Startup(
             state.borrow().settings.startup,
             std::env::current_exe()?,
@@ -1083,18 +1395,18 @@ fn run() -> Result<()> {
                 let mut tray_ref = native.borrow_mut();
                 let Some(tray) = tray_ref.as_mut() else {
                     u.set_hotkey_capture_index(-1);
-                    u.set_status(if u.get_english() { "Global shortcut window is not ready yet." } else { "پنجرهٔ میانبر هنوز آماده نیست." }.into());
+                    u.set_status(if u.get_english() { "Global shortcut window is not ready yet." } else { "پنجرهٔ میان‌بر هنوز آماده نیست." }.into());
                     return;
                 };
                 tray.begin_hotkey_capture(index as usize);
-                u.set_status(if u.get_english() { "Press the shortcut now. Escape cancels." } else { "میانبر را فشار بده؛ Escape لغو می‌کند." }.into());
+                u.set_status(if u.get_english() { "Press the shortcut now. Escape cancels." } else { "میان‌بر را فشار بده؛ کلید Escape لغو می‌کند." }.into());
             } else {
                 let bindings = state.borrow().settings.hotkeys.clone();
                 let errors = native.borrow_mut().as_mut().map(|tray| tray.register_hotkeys(&bindings)).unwrap_or_default();
                 state.borrow_mut().hotkey_errors = errors;
                 u.set_hotkey_capture_index(-1);
                 sync_hotkey_rows(&u, &state.borrow());
-                u.set_status(if u.get_english() { "Shortcut recording cancelled." } else { "ضبط میانبر لغو شد." }.into());
+                u.set_status(if u.get_english() { "Shortcut recording cancelled." } else { "ضبط میان‌بر لغو شد." }.into());
             }
         });
     }
@@ -1242,6 +1554,7 @@ fn run() -> Result<()> {
                     match action {
                         native_tray::Action::Show => show(&u),
                         native_tray::Action::Repaint => { if u.window().is_visible() { window_repaint::full_redraw(u.window()); } }
+                        native_tray::Action::FitWindow => { if u.window().is_visible() { window_repaint::fit_native_work_area(); } }
                         native_tray::Action::Pause => u.invoke_toggle_pause(),
                         native_tray::Action::Hotkey(index) => handle_hotkey(&u, &s, &osd, index),
                         native_tray::Action::CapturedHotkey(index, vk, modifiers) => accept_captured_hotkey(&u, &s, &native, index, vk, modifiers),
@@ -1251,8 +1564,13 @@ fn run() -> Result<()> {
                             u.invoke_config_changed();
                         }
                         native_tray::Action::Exit => {
-                            u.invoke_exit_app();
-                            return;
+                            // The installer may repost Exit while waiting. Keep draining
+                            // the background result after the first request starts shutdown.
+                            let already_exiting = s.borrow().exiting;
+                            if !already_exiting {
+                                u.invoke_exit_app();
+                                return;
+                            }
                         }
                         native_tray::Action::Refresh => {
                             if let Err(e) = native.borrow_mut().as_mut().unwrap().register() {
@@ -1286,7 +1604,20 @@ fn run() -> Result<()> {
                             s.engine = engine;
                             match result {
                                 Ok(()) => { let _ = slint::quit_event_loop(); return; }
-                                Err(e) => { s.exiting = false; s.error = Some(format!("{e:#}")); u.set_busy(false); u.set_status(format!("{e:#}").into()); u.set_audio_error(format!("{e:#}").into()); show(&u); }
+                                Err(e) => {
+                                    log::error!("Safe exit failed: {e:#}");
+                                    let message = if u.get_english() {
+                                        "Safe exit could not be verified. Check the audio output and access to the data folder, then retry Exit app."
+                                    } else {
+                                        "خروج امن تأیید نشد. اتصال خروجی صدا و دسترسی به پوشهٔ داده‌ها را بررسی کنید و دوباره گزینهٔ خروج را بزنید."
+                                    };
+                                    s.exiting = false;
+                                    s.error = Some(message.into());
+                                    u.set_busy(false);
+                                    u.set_status(message.into());
+                                    u.set_audio_error(message.into());
+                                    show(&u);
+                                }
                             }
                         }
                     }
@@ -1348,36 +1679,114 @@ fn run() -> Result<()> {
                 for event in s.components.poll() {
                     match event {
                         components::Event::Metadata(m) => {
-                            u.set_latest_version(format!("Pack{}", m.latest).into());
-                            u.set_update_available(m.latest > m.confirmed_pack);
+                            u.set_latest_version(if m.latest > 0 { format!("Pack{}", m.latest) } else { String::new() }.into());
+                            u.set_update_available(m.confirmed_pack > 0 && m.latest > m.confirmed_pack);
                         }
                         components::Event::Progress(p) => u.set_download_progress(p),
                         components::Event::Message(m) => u.set_component_message(m.into()),
+                        components::Event::CheckFinished { installed, outcome } => {
+                            finish_component_check(&u, installed, outcome);
+                            if let Err(e) = refresh(&u, &mut s) {
+                                log::error!("Refresh after components check: {e:#}");
+                            }
+                        }
                         components::Event::Done(found) => {
                             u.set_components_busy(false);
+                            u.set_components_installing(false);
                             u.set_cable_installed(found);
                             if let Err(e) = refresh(&u, &mut s) {
                                 log::error!("Refresh after components check: {e:#}");
                             }
                         }
-                        components::Event::Error(e) => {
+                        components::Event::Error(e) => component_error(&u, e),
+                        components::Event::Downloaded => {
                             u.set_components_busy(false);
-                            u.set_component_message(e.into());
+                            u.set_components_installing(false);
+                            u.set_component_message(if u.get_english() { "Fresh package verified and saved. Choose Install / repair to launch setup." } else { "بستهٔ تازه تأیید و ذخیره شد. برای اجرای نصاب، نصب / ترمیم را بزن." }.into());
                         }
                     }
                 }
                 for event in s.app_updates.poll() {
                     match event {
                         app_update::Event::Found { version, update_available } => {
+                            u.set_app_release_notes_ready(s.app_updates.release_notes_url().is_some());
                             u.set_app_latest_version(version.into());
+                            u.set_app_update_installable(update_available);
+                            u.set_app_update_cancelling(false);
                             u.set_app_update_state(if update_available { 3 } else { 2 });
                         }
                         app_update::Event::Error(error) => {
-                            u.set_app_update_state(4);
-                            u.set_app_latest_version(error.into());
+                            app_update_error(&u, &error);
+                        }
+                        app_update::Event::Progress(progress) => {
+                            u.set_app_update_progress(progress.clamp(0.0, 1.0));
+                            if !u.get_app_update_cancelling() { u.set_app_update_state(if progress >= 1.0 { 6 } else { 5 }); }
+                        }
+                        app_update::Event::Cancelled => {
+                            u.set_app_update_cancelling(false);
+                            u.set_app_update_progress(0.0);
+                            u.set_app_update_state(8);
+                        }
+                        app_update::Event::Downloaded(installer) => {
+                            if s.exiting {
+                                if let Err(error) = app_update::discard_download(&installer) { log::warn!("Discard update on exit: {error:#}"); }
+                                continue;
+                            }
+                            u.set_app_update_cancelling(false);
+                            u.set_app_update_state(7);
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            s.update_handoff_result = Some(rx);
+                            std::thread::spawn(move || {
+                                let result = update_handoff::launch_verified(&installer, env!("CARGO_PKG_VERSION"));
+                                if let Err(error) = app_update::discard_download(&installer) { log::warn!("Discard update download after handoff: {error:#}"); }
+                                let _ = tx.send(result);
+                            });
                         }
                     }
                 }
+                let handoff = s.update_handoff_result.as_ref().and_then(|rx| match rx.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err(anyhow::anyhow!("UPD_HANDOFF: update worker disconnected"))),
+                });
+                if let Some(result) = handoff {
+                    s.update_handoff_result = None;
+                    match result {
+                        Ok(probe) => s.update_health = Some(probe),
+                        Err(error) => app_update_error(&u, &format!("{error:#}")),
+                    }
+                }
+                let ready_for_health = u.get_recovery_ready() && u.get_devices_ready() && s.error.is_none() && !s.exiting;
+                let mut retire_probe = false;
+                if let Some(probe) = s.update_health.as_mut() {
+                    if ready_for_health {
+                        if let Err(error) = probe.acknowledge(env!("CARGO_PKG_VERSION")) {
+                            app_update_error(&u, &format!("UPD_HANDOFF: startup acknowledgement failed: {error:#}"));
+                            retire_probe = true;
+                        }
+                    }
+                    match probe.poll_result() {
+                        Ok(Some(result)) => {
+                            log::info!("Application update outcome {:?}, version {}: {}", result.status, result.version, result.message);
+                            if let Some(path) = result.backup_path { log::warn!("Update recovery backups: {}", path.display()); }
+                            u.set_app_update_state(match result.status {
+                                update_handoff::UpdateStatus::Updated => 9,
+                                update_handoff::UpdateStatus::RolledBack => 10,
+                                update_handoff::UpdateStatus::RecoveryRequired => 11,
+                                update_handoff::UpdateStatus::Failed => 4,
+                            });
+                            if matches!(result.status, update_handoff::UpdateStatus::Failed) { u.set_app_update_error_kind(6); }
+                            u.set_app_update_cancelling(false);
+                            retire_probe = true;
+                        }
+                        Ok(None) => (),
+                        Err(error) => {
+                            app_update_error(&u, &format!("UPD_HANDOFF: could not read the update result: {error:#}"));
+                            retire_probe = true;
+                        }
+                    }
+                }
+                if retire_probe { s.update_health = None; }
                 if s.save_at
                     .is_some_and(|i| i.elapsed() > Duration::from_millis(600))
                 {
@@ -1396,6 +1805,11 @@ fn run() -> Result<()> {
                 }
                 let snap = *s.engine.snapshot.lock().unwrap_or_else(|p| p.into_inner());
                 let m = snap.meters;
+                u.set_measurement_source(match snap.source {
+                    audio_engine::MeasurementSource::Unavailable => 0,
+                    audio_engine::MeasurementSource::Sampled => 1,
+                    audio_engine::MeasurementSource::PeakEstimate => 2,
+                });
                 let meter_index = |value: f32| dsp::index(value as f64);
                 let input = meter_index(m.input);
                 let output = if snap.silent {
@@ -1562,7 +1976,7 @@ fn run() -> Result<()> {
         14 => { snapshot_png(&u, &directory.join("Routing-Help-FA.png"))?; u.invoke_close_routing_help(); window_repaint::resize_logically(u.window(), 1120., 760.); u.set_page(4); u.set_leveling(false); u.set_intensity(2); u.set_treble_smoothing(false); u.set_target(0); u.invoke_config_changed(); u.set_startup(false); u.invoke_startup_changed(); u.set_startup(true); u.invoke_startup_changed(); u.set_startup_active(true); u.invoke_config_changed(); },
         15 => { let saved = Settings::load(&directory); anyhow::ensure!(!saved.leveling && saved.intensity == 2 && !saved.treble_smoothing && saved.target == 0 && saved.profile == 1 && saved.startup && saved.startup_active, "Independent features/intensity/smoothing/startup settings did not persist"); u.invoke_scroll_settings_to(0.); snapshot_png(&u, &directory.join("Settings-FA-Top-Min.png"))?; u.set_english(true); u.invoke_config_changed(); snapshot_png(&u, &directory.join("Settings-EN-Top-Min.png"))?; u.set_english(false); u.invoke_config_changed(); u.invoke_scroll_settings_to(500.); },
         16 => { snapshot_png(&u, &directory.join("Settings-Shortcuts-FA-Min.png"))?; u.set_english(true); u.invoke_config_changed(); snapshot_png(&u, &directory.join("Settings-Shortcuts-EN-Min.png"))?; u.set_english(false); u.invoke_config_changed(); u.invoke_scroll_settings_to(0.); anyhow::ensure!(Settings::load(&directory).profile == 1 && !u.get_leveling(), "Settings changed during shortcut visual verification"); u.invoke_choose_profile(6); u.set_page(6); },
-        17 => { anyhow::ensure!(u.get_app_version() == "1.0.2", "About version mismatch"); u.invoke_check_app_update(); anyhow::ensure!(u.get_app_update_state() == 2 && u.get_app_latest_version() == "v1.0.2", "About current-version state failed"); snapshot_png(&u, &directory.join("About-FA.png"))?; u.set_app_update_state(4); u.set_app_latest_version("verification network error".into()); snapshot_png(&u, &directory.join("About-Update-Error-FA.png"))?; u.set_english(true); u.set_app_update_state(3); u.set_app_latest_version("v1.0.3".into()); },
+        17 => { anyhow::ensure!(u.get_app_version() == env!("CARGO_PKG_VERSION"), "About version mismatch"); u.invoke_check_app_update(); anyhow::ensure!(u.get_app_update_state() == 2 && u.get_app_latest_version() == format!("v{}", env!("CARGO_PKG_VERSION")), "About current-version state failed"); snapshot_png(&u, &directory.join("About-FA.png"))?; u.set_app_update_state(4); u.set_app_latest_version("verification network error".into()); snapshot_png(&u, &directory.join("About-Update-Error-FA.png"))?; u.set_english(true); u.set_app_update_state(3); u.set_app_latest_version("v1.0.3".into()); },
         18 => { snapshot_png(&u, &directory.join("About-EN.png"))?; u.set_english(false); u.set_page(5); u.invoke_refresh_conflicts(); },
         19 => { snapshot_png(&u, &directory.join("Conflicts-FA.png"))?; u.set_conflicts(Rc::new(VecModel::from(vec![ConflictRow { pid: 12345, name: "FxSound · verification preview".into(), exe: "FxSound.exe".into() }])).into()); },
         20 => { snapshot_png(&u, &directory.join("Conflicts-Warning.png"))?; u.invoke_end_conflict(12345); u.set_leveling(true); u.invoke_set_enhancement(false); u.invoke_config_changed(); u.set_page(0); },
@@ -1653,7 +2067,7 @@ fn engine_smoke(data: &Path) -> Result<()> {
     let devices = core_audio::devices()?;
     let id = devices
         .iter()
-        .find(|d| d.virtual_input && d.name.contains("CABLE Input"))
+        .find(|d| d.vb_cable)
         .or_else(|| devices.iter().find(|d| d.virtual_input))
         .context("An installed virtual cable is required for isolated leveler verification")?
         .id
@@ -1761,7 +2175,7 @@ fn engine_smoke(data: &Path) -> Result<()> {
     let devices = core_audio::devices()?;
     let source = devices
         .iter()
-        .find(|d| d.name.to_ascii_lowercase().starts_with("cable input"))
+        .find(|d| d.vb_cable)
         .context("Full processing smoke requires installed VB-CABLE")?;
     let output = devices
         .iter()
@@ -1910,6 +2324,139 @@ mod hotkey_capture_tests {
         assert_eq!(new_registration_failures(&candidate, &previous, &[], &fresh, Some(4)).len(), 1);
     }
 }
+#[cfg(test)]
+mod audio_control_mode_tests {
+    use super::*;
+    use slint::platform::{software_renderer::{MinimalSoftwareWindow, RepaintBufferType}, Platform, PlatformError, WindowAdapter, WindowEvent, PointerEventButton};
+    use std::{cell::Cell, rc::Rc, time::Duration};
+
+    struct Headless(Rc<MinimalSoftwareWindow>, Rc<Cell<Duration>>);
+    impl Platform for Headless {
+        fn create_window_adapter(&self) -> std::result::Result<Rc<dyn WindowAdapter>, PlatformError> { Ok(self.0.clone()) }
+        fn duration_since_start(&self) -> Duration { self.1.get() }
+    }
+
+    fn click(ui: &AppWindow, bounds: ControlBounds) {
+        let position = slint::LogicalPosition::new(bounds.x + bounds.width / 2., bounds.y + bounds.height / 2.);
+        ui.window().dispatch_event(WindowEvent::PointerMoved { position });
+        ui.window().dispatch_event(WindowEvent::PointerPressed { position, button: PointerEventButton::Left });
+        ui.window().dispatch_event(WindowEvent::PointerReleased { position, button: PointerEventButton::Left });
+    }
+
+    #[test]
+    fn sound_controls_require_full_mode_without_losing_saved_preferences() {
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+        let clock = Rc::new(Cell::new(Duration::ZERO));
+        slint::platform::set_platform(Box::new(Headless(adapter.clone(), clock.clone()))).unwrap();
+        adapter.set_size(slint::LogicalSize::new(1280., 860.));
+        let ui = AppWindow::new().unwrap();
+        ui.set_app_version(env!("CARGO_PKG_VERSION").into());
+        ui.set_page(0);
+        ui.set_mode(1);
+        ui.set_profile(3);
+        ui.set_last_profile(3);
+        ui.set_treble_smoothing(true);
+        let saved = Rc::new(RefCell::new(Settings::default()));
+        let changes = Rc::new(Cell::new(0usize));
+        let weak = ui.as_weak();
+        let saved_for_callback = saved.clone();
+        let changes_for_callback = changes.clone();
+        ui.on_config_changed(move || {
+            let ui = weak.upgrade().unwrap();
+            let mut settings = saved_for_callback.borrow_mut();
+            settings.mode = ui.get_mode();
+            settings.profile = ui.get_profile();
+            settings.last_profile = ui.get_last_profile();
+            settings.treble_smoothing = ui.get_treble_smoothing();
+            changes_for_callback.set(changes_for_callback.get() + 1);
+        });
+        ui.invoke_config_changed();
+        ui.show().unwrap();
+        let settle = || {
+            clock.set(clock.get() + Duration::from_millis(500));
+            slint::platform::update_timers_and_animations();
+            let size = ui.window().size();
+            let mut pixels = vec![slint::Rgb8Pixel::default(); (size.width * size.height) as usize];
+            adapter.draw_if_needed(|r| { r.render(&mut pixels, size.width as usize); });
+        };
+        settle();
+        assert!(ui.get_enhancement_available() && ui.get_enhancement_checked_effective());
+        assert!(ui.get_treble_available() && ui.get_treble_checked_effective());
+        click(&ui, ui.get_enhancement_toggle_bounds());
+        assert_eq!(ui.get_profile(), 0, "Full-mode mouse click must turn enhancement off");
+        assert!(!ui.get_treble_available() && !ui.get_treble_checked_effective());
+        ui.invoke_request_treble_smoothing(false);
+        assert!(ui.get_treble_smoothing(), "Profile-off must preserve the treble preference");
+        click(&ui, ui.get_enhancement_toggle_bounds());
+        assert_eq!(ui.get_profile(), 3, "Full-mode toggle must restore the remembered profile");
+        click(&ui, ui.get_treble_toggle_bounds());
+        assert!(!ui.get_treble_smoothing(), "Full-mode mouse click must change treble preference");
+        click(&ui, ui.get_treble_toggle_bounds());
+        assert!(ui.get_treble_smoothing());
+        ui.invoke_request_treble_smoothing(false); // Same request path as shortcut action 10.
+        assert!(!saved.borrow().treble_smoothing);
+        ui.invoke_request_treble_smoothing(true);
+        assert!(saved.borrow().treble_smoothing);
+
+        // Keep keyboard focus on a control while the mode changes.
+        ui.set_mode(0);
+        ui.invoke_config_changed();
+        settle();
+        let changes_before_blocked_inputs = changes.get();
+        for english in [false, true] {
+            ui.set_english(english);
+            settle();
+            assert_eq!(ui.get_processing_mode_warning().as_str(), if english { "Requires switching to virtual cable processing mode." } else { "نیازمند تغییر حالت به پردازش کابل مجازی" });
+            assert!(ui.get_enhancement_hint_visible());
+            assert!(!ui.get_enhancement_available() && !ui.get_enhancement_checked_effective());
+            assert!(!ui.get_treble_available() && !ui.get_treble_checked_effective());
+            click(&ui, ui.get_enhancement_toggle_bounds());
+            click(&ui, ui.get_treble_toggle_bounds());
+            let space: slint::SharedString = " ".into();
+            ui.window().dispatch_event(WindowEvent::KeyPressed { text: space.clone() });
+            ui.window().dispatch_event(WindowEvent::KeyReleased { text: space });
+            ui.invoke_set_enhancement(false);
+            ui.invoke_choose_profile(6);
+            ui.invoke_request_treble_smoothing(false);
+            assert_eq!((ui.get_profile(), ui.get_last_profile(), ui.get_treble_smoothing()), (3, 3, true));
+            for action in 8..=10 {
+                let blocked = unavailable_audio_control_shortcut(&ui, action).unwrap();
+                assert_eq!(blocked.1, "Requires switching to virtual cable processing mode.");
+            }
+        }
+        assert_eq!(changes.get(), changes_before_blocked_inputs, "Disabled controls must not persist changes");
+        let persisted: Settings = serde_json::from_str(&serde_json::to_string(&*saved.borrow()).unwrap()).unwrap();
+        assert_eq!((persisted.profile, persisted.last_profile, persisted.treble_smoothing), (3, 3, true));
+        ui.set_mode(1);
+        ui.invoke_config_changed();
+        settle();
+        assert!(ui.get_enhancement_checked_effective() && ui.get_treble_checked_effective());
+        assert!(!ui.get_enhancement_hint_visible());
+        assert!(unavailable_audio_control_shortcut(&ui, 8).is_none());
+        assert!(unavailable_audio_control_shortcut(&ui, 9).is_none());
+        assert!(unavailable_audio_control_shortcut(&ui, 10).is_none());
+        if let Some(folder) = std::env::var_os("MAXI_AUDIO_CONTROLS_DIR") {
+            let folder = std::path::PathBuf::from(folder);
+            std::fs::create_dir_all(&folder).unwrap();
+            for (mode, english, label) in [(0, false, "Windows-FA"), (0, true, "Windows-EN"), (1, true, "Full-EN")] {
+                adapter.set_size(slint::LogicalSize::new(820., if mode == 0 && !english { 1000. } else { 760. }));
+                ui.set_mode(mode);
+                ui.set_english(english);
+                ui.invoke_scroll_page(if mode == 0 && !english { 0.85 } else { 0.5 });
+                settle();
+                let size = ui.window().size();
+                let mut pixels = vec![slint::Rgb8Pixel::default(); (size.width * size.height) as usize];
+                window_repaint::full_redraw(ui.window());
+                adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, size.width as usize); });
+                let path = folder.join(format!("{label}.png"));
+                let mut encoder = png::Encoder::new(std::fs::File::create(path).unwrap(), size.width, size.height);
+                encoder.set_color(png::ColorType::Rgb);
+                encoder.set_depth(png::BitDepth::Eight);
+                encoder.write_header().unwrap().write_image_data(&pixels.iter().flat_map(|p| [p.r, p.g, p.b]).collect::<Vec<_>>()).unwrap();
+            }
+        }
+    }
+}
 struct Instance {
     mutex: windows::Win32::Foundation::HANDLE,
     event: windows::Win32::Foundation::HANDLE,
@@ -1949,6 +2496,63 @@ impl Drop for Instance {
         }
     }
 }
+#[cfg(test)]
+mod audio_measurement_ui_tests {
+    use super::*;
+    use slint::platform::{
+        software_renderer::{MinimalSoftwareWindow, RepaintBufferType},
+        Platform, PlatformError, WindowAdapter,
+    };
+    use std::{cell::Cell, rc::Rc};
+
+    struct Headless(Rc<MinimalSoftwareWindow>, Rc<Cell<Duration>>);
+    impl Platform for Headless {
+        fn create_window_adapter(&self) -> std::result::Result<Rc<dyn WindowAdapter>, PlatformError> {
+            Ok(self.0.clone())
+        }
+        fn duration_since_start(&self) -> Duration { self.1.get() }
+    }
+
+    #[test]
+    #[ignore = "Opt-in headless AUD-03 source-label captures"]
+    fn capture_source_labels() {
+        let directory = PathBuf::from(std::env::var_os("MAXI_AUD03_CAPTURE_DIR").expect("capture directory"));
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+        let clock = Rc::new(Cell::new(Duration::ZERO));
+        slint::platform::set_platform(Box::new(Headless(adapter.clone(), clock.clone()))).unwrap();
+        let ui = AppWindow::new().unwrap();
+        ui.set_app_version(env!("CARGO_PKG_VERSION").into());
+        ui.set_page(0);
+        ui.set_running(true);
+        ui.show().unwrap();
+        adapter.set_size(slint::LogicalSize::new(640., 320.));
+        ui.set_sidebar_expanded(false);
+        for (language, english) in [("FA", false), ("EN", true)] {
+            ui.set_english(english);
+            ui.set_measurement_source(2);
+            let mut pixels = Vec::new();
+            for pass in 0..8 {
+                clock.set(clock.get() + Duration::from_millis(250));
+                slint::platform::update_timers_and_animations();
+                if pass == 3 { ui.invoke_scroll_page(0.8); }
+                let size = ui.window().size();
+                pixels.resize((size.width * size.height) as usize, slint::Rgb8Pixel::default());
+                window_repaint::full_redraw(ui.window());
+                adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, size.width as usize); });
+            }
+            let size = ui.window().size();
+            assert_eq!((size.width, size.height), (640, 320));
+            assert!(ui.get_minimum_size_valid() && ui.get_sound_layout_fits(), "Sound layout overflow at minimum/{language}");
+            fs::write(directory.join(format!("layout-minimum-{language}.txt")), format!("viewport={}x{}; minimum_size_valid={}; sound_layout_fits={}; sound_scroll_range={:?}; sound_scroll_offset={:?}\n", size.width, size.height, ui.get_minimum_size_valid(), ui.get_sound_layout_fits(), ui.get_sound_scroll_range(), ui.get_sound_scroll_offset())).unwrap();
+            let path = directory.join(format!("source-minimum-{language}-peak.png"));
+            let mut encoder = png::Encoder::new(fs::File::create(path).unwrap(), size.width, size.height);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.write_header().unwrap().write_image_data(&pixels.iter().flat_map(|p| [p.r, p.g, p.b]).collect::<Vec<_>>()).unwrap();
+        }
+    }
+}
+
 fn main() {
     if let Err(e) = run() {
         log::error!("Application error: {e:#}");
