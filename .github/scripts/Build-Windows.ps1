@@ -47,3 +47,4 @@ $taskChecksums = foreach ($taskName in @('MaxiSoundSet.exe', 'MaxiSoundSet-Setup
     '{0}  {1}' -f $taskHash.Hash.ToLowerInvariant(), $taskName
 }
 $taskChecksums | Set-Content -LiteralPath (Join-Path $taskOutput 'SHA256SUMS.txt') -Encoding utf8
+

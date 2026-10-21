@@ -31,4 +31,3 @@ tools with the Windows SDK, then run from the repository root in PowerShell:
 The output is written to `artifacts/windows-x64`. GitHub keeps uploaded artifacts
 for 14 days. The workflow has read-only repository permissions, does not retain
 checkout credentials, and does not need repository secrets.
-

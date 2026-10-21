@@ -48,4 +48,3 @@ jobs:
           path: artifacts/windows-x64/*
           if-no-files-found: error
           retention-days: 14
-
