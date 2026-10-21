@@ -12,7 +12,6 @@ target
 **/*.msi
 **/*.zip
 **/*.sha256
-/artifacts/
 
 # Local credentials and signing material
 **/.env
