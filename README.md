@@ -36,6 +36,10 @@ MAXI SOUNDSET is a Windows app for keeping loudness steady, shaping sound with a
   <img src="https://raw.githubusercontent.com/MaxiSpace/MaxiSoundSet/07234a134ebf28ef5a55c71345f93bd1de51e64a/docs/screenshots/v1.0.4/dashboard-english.png" width="1280" height="860" alt="MAXI SOUNDSET dashboard in English">
   <br><br>
   <img src="https://raw.githubusercontent.com/MaxiSpace/MaxiSoundSet/07234a134ebf28ef5a55c71345f93bd1de51e64a/docs/screenshots/v1.0.4/tray-menu.png" width="354" height="363" alt="Menu beside the clock">
+  <br><br>
+  <img src="https://raw.githubusercontent.com/MaxiSpace/MaxiSoundSet/bd3e0d083ebfdb1a825bc30b9a8331d0f4b811e7/docs/screenshots/v1.0.4/settings-english.png" width="1280" height="655" alt="Settings in English">
+  <br><br>
+  <img src="https://raw.githubusercontent.com/MaxiSpace/MaxiSoundSet/bd3e0d083ebfdb1a825bc30b9a8331d0f4b811e7/docs/screenshots/v1.0.4/about-english.png" width="1280" height="860" alt="About MAXI SOUNDSET in English">
 </p>
 
 ---
@@ -162,6 +166,10 @@ MAXI SOUNDSET is licensed under the [GNU General Public License v3.0](MaxiSoundS
   <img src="https://raw.githubusercontent.com/MaxiSpace/MaxiSoundSet/07234a134ebf28ef5a55c71345f93bd1de51e64a/docs/screenshots/v1.0.4/dashboard-persian.png" width="1280" height="860" alt="داشبورد فارسی مکسی سوندست">
   <br><br>
   <img src="https://raw.githubusercontent.com/MaxiSpace/MaxiSoundSet/07234a134ebf28ef5a55c71345f93bd1de51e64a/docs/screenshots/v1.0.4/tray-menu.png" width="354" height="363" alt="منوی کنار ساعت">
+  <br><br>
+  <img src="https://raw.githubusercontent.com/MaxiSpace/MaxiSoundSet/bd3e0d083ebfdb1a825bc30b9a8331d0f4b811e7/docs/screenshots/v1.0.4/settings-persian.png" width="1280" height="655" alt="صفحهٔ تنظیمات فارسی">
+  <br><br>
+  <img src="https://raw.githubusercontent.com/MaxiSpace/MaxiSoundSet/bd3e0d083ebfdb1a825bc30b9a8331d0f4b811e7/docs/screenshots/v1.0.4/about-persian.png" width="1280" height="860" alt="صفحهٔ دربارهٔ برنامه به فارسی">
 </p>
 ---
 
