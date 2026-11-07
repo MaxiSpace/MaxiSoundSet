@@ -7,7 +7,7 @@
 
 **Adaptive Audio Processing & Loudness Control for Windows**
 
-[![Release](https://img.shields.io/badge/Release-v1.0.3-2ea44f?style=for-the-badge&logo=github)](../../releases)
+[![Release](https://img.shields.io/badge/Release-Latest-2ea44f?style=for-the-badge&logo=github)](../../releases)
 [![Rust](https://img.shields.io/badge/Rust-black?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Slint](https://img.shields.io/badge/Slint-UI-27ae60?style=for-the-badge)](https://slint.dev/)
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://microsoft.com/windows)
@@ -26,20 +26,16 @@
 
 ## 📖 About MAXI SOUNDSET
 
-An advanced adaptive sound and loudness controller for Windows, built with a high-performance Rust backend and the Slint UI framework. It delivers seamless volume stabilization, audio enhancement, and a dedicated equalizer—giving you ultimate granular control to craft the perfect audio output. 
-
-Designed for speed and low memory footprint, it runs smoothly in the background without affecting your system's gaming or multitasking performance.
+MAXI SOUNDSET is a Windows app for keeping loudness steady, shaping sound with an equalizer, and monitoring audio as it plays. Version 1.0.4 makes volume easier to control from the tray and improves how the app handles changes to audio devices.
 
 ---
 
 ## 📸 Screenshots
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/794b8e61-323b-4110-aaf4-a8ed4a956c67" width="1270" height="861" alt="Dashboard">
+  <img src="https://raw.githubusercontent.com/MaxiSpace/MaxiSoundSet/07234a134ebf28ef5a55c71345f93bd1de51e64a/docs/screenshots/v1.0.4/dashboard-english.png" width="1280" height="860" alt="MAXI SOUNDSET dashboard in English">
   <br><br>
-  <img src="https://github.com/user-attachments/assets/4f5cb2f5-9f1a-4b49-a9d5-c07e1d856cee" width="1280" height="855" alt="Equalizer">
-  <br><br>
-  <img src="https://github.com/user-attachments/assets/a19c6a16-b111-4610-b6d8-db0c02450f3f" width="1293" height="868" alt="Setting">
+  <img src="https://raw.githubusercontent.com/MaxiSpace/MaxiSoundSet/07234a134ebf28ef5a55c71345f93bd1de51e64a/docs/screenshots/v1.0.4/tray-menu.png" width="354" height="363" alt="Menu beside the clock">
 </p>
 
 ---
@@ -48,18 +44,18 @@ Designed for speed and low memory footprint, it runs smoothly in the background 
 
 <div align="center">
 
-[![Download MAXI SOUNDSET](https://img.shields.io/badge/Download-MAXI--SOUNDSET--v1.0.3--Setup.exe-success?style=for-the-badge&logo=windows&logoColor=white)](../../releases)
+[![Download MAXI SOUNDSET](https://img.shields.io/badge/Download-Latest%20Available-success?style=for-the-badge&logo=windows&logoColor=white)](../../releases)
 
 *Compatible with Windows 10 & 11 (64-bit)*
 
 </div>
 
-1. Download **`MAXI-SOUNDSET-v1.0.3-Setup.exe`** from the [Releases](../../releases) page.
+1. Download the latest available setup file from the [Releases](../../releases) page.
 2. Run the installer and complete the setup.
-3. The application can also be launched directly from its installed folder.
+3. The application can also be launched from its installed folder.
 
 > [!NOTE]
-> After installing the software, an Uninstall file will also be placed in the installation folder, which you can use to completely remove the software.
+> Setup can ask the app to close safely if it is open in the selected folder. After installation, you can use the Uninstall file in that folder to remove the app.
 
 > [!IMPORTANT]
 > Do not remove or relocate any files installed alongside the main executable.
@@ -72,12 +68,12 @@ Designed for speed and low memory footprint, it runs smoothly in the background 
 - 🎵 **Audio Smoothing & Enhancement:** Refines sound output, smooths out harsh trebles, and boosts overall audio quality.
 - 🎛️ **Dedicated Equalizer:** Features multiple built-in EQ presets alongside a fully manual tuning system.
 - 📊 **Real-time Audio Monitor:** Visualizes input and output audio levels instantly.
-- ⚡ **High Performance & Low Resource Usage:** Engineered with Rust for maximum speed and optimal RAM efficiency.
+- 🖱️ **Tray controls:** Scroll over the icon beside the clock to adjust volume, or open its menu to show the dashboard and control playback.
 - 🎮 **Customizable Global Hotkeys:** Configure shortcuts to tweak audio settings on the fly while inside other applications or games.
 - 🛠️ **Audio Conflict Resolution:** Built-in tools to close or resolve potential audio routing conflicts.
-- 🎧 **Output Device Control:** Select and manage any active audio output device easily.
-- 🔀 **Virtual Audio Routing:** Optionally route processed audio to a virtual cable for live streaming and recording workflows.
-- 🎛️ **Fully Modular:** Every single feature mentioned above can be optionally enabled or disabled based on your needs.
+- 🎧 **Output devices:** Pick an output and refresh the list if you reconnect a device.
+- 🔀 **Audio routing:** Use Windows volume control or select Full mode for processing through a virtual cable.
+- 🔔 **Volume notices:** See changes in a small animated notice that also tells you when processing is paused or stopped.
 - 🚀 **Windows Integration:** Run automatically on system startup and resume the last active audio session after sign-in.
 - 🌍 **Dual Interface:** Fully supports both English (LTR) and Persian (RTL).
 
@@ -98,13 +94,13 @@ By installing this optional component, you unlock advanced audio control and max
 ## 🛠️ Troubleshooting & FAQ
 
 **No Sound Output?**
-If you lose audio, make sure you have selected the correct output device in the software. To check if the issue is Windows-related, temporarily disable the software and see if you receive standard Windows audio. 
+Check the selected playback device. If your headphones have just reconnected, refresh the output list and select them again if needed.
 
 **Closed the App but Still No Sound?**
 Sometimes, when you close the software, Windows may keep the default playback device set to the Virtual Cable. You can quickly fix this by clicking the volume icon in your Windows taskbar and changing the output back to your physical speakers or headphones.
 
 **Selecting Audio Inputs:**
-The software allows you to change and select the audio input path. If you have already configured a path in Windows, you can simply set the software's input directly to the Windows default.
+In Full mode, open the help beside Virtual Input to see which cable input to use.
 
 **Virtual Cable Routing Setting:**
 Ensure the **"Virtual cable routing"** option in the software is set to *Automatic*, unless you are using a different custom audio input and need to configure it manually.
@@ -156,20 +152,16 @@ MAXI SOUNDSET is licensed under the [GNU General Public License v3.0](MaxiSoundS
 
 ## 📖 درباره MAXI SOUNDSET
 
-نرم‌افزاری پیشرفته برای تطبیق و کنترل هوشمند صدای ویندوز که بر پایه ترکیب قدرتمند زبان Rust و فریم‌ورک Slint توسعه یافته است. این برنامه با تثبیت خودکار بلندی صدا، بهبود کیفیت صوت و بهره‌گیری از یک اکولایزر اختصاصی، بالاترین سطح از اختیار و شخصی‌سازی را به شما می‌دهد تا به یک خروجی صوتی بی‌نقص و ایده‌آل دست پیدا کنید.
-
-این نرم‌افزار با تمرکز بر سرعت و مصرف بهینه حافظه (RAM) طراحی شده است و بدون هیچ‌گونه تأثیر منفی بر عملکرد سیستم در هنگام اجرای بازی‌ها یا انجام چندین کار همزمان، با خیالی آسوده در پس‌زمینه اجرا می‌شود.
+مکسی سوندست برنامه‌ای برای ثابت نگه‌داشتن بلندی صدا، تنظیم صدا با اکولایزر و دیدن سطح صدا هنگام پخش است. در نسخهٔ ۱.۰.۴ کنترل ولوم از کنار ساعت راحت‌تر شده و برنامه تغییر دستگاه‌های صوتی را بهتر تشخیص می‌دهد.
 
 ---
 
 ## 📸 تصاویر محیط برنامه
 
 <p align="center">
-  <img width="1276" height="852" alt="Dashboard" src="https://github.com/user-attachments/assets/a881b2ec-7f3b-4500-a08f-09e9e2da0171" />
+  <img src="https://raw.githubusercontent.com/MaxiSpace/MaxiSoundSet/07234a134ebf28ef5a55c71345f93bd1de51e64a/docs/screenshots/v1.0.4/dashboard-persian.png" width="1280" height="860" alt="داشبورد فارسی مکسی سوندست">
   <br><br>
-  <img width="1274" height="851" alt="Equalizer" src="https://github.com/user-attachments/assets/1f3162e5-55e9-4800-a95b-d3d6a0ec3328" />
-  <br><br>
-  <img width="1274" height="855" alt="Setting" src="https://github.com/user-attachments/assets/1f16efcc-7b29-4973-9be5-8ddc8baa8dad" />
+  <img src="https://raw.githubusercontent.com/MaxiSpace/MaxiSoundSet/07234a134ebf28ef5a55c71345f93bd1de51e64a/docs/screenshots/v1.0.4/tray-menu.png" width="354" height="363" alt="منوی کنار ساعت">
 </p>
 ---
 
@@ -177,18 +169,18 @@ MAXI SOUNDSET is licensed under the [GNU General Public License v3.0](MaxiSoundS
 
 <div align="center">
 
-[![دانلود مکسی سوندست](https://img.shields.io/badge/دانلود-MAXI--SOUNDSET--v1.0.3--Setup.exe-success?style=for-the-badge&logo=windows&logoColor=white)](../../releases)
+[![دانلود مکسی سوندست](https://img.shields.io/badge/دانلود-آخرین%20نسخه-success?style=for-the-badge&logo=windows&logoColor=white)](../../releases)
 
 *سازگار با ویندوز ۱۰ و ۱۱ (نسخهٔ ۶۴ بیتی)*
 
 </div>
 
-۱. فایل نصبی **`MAXI-SOUNDSET-v1.0.3-Setup.exe`** را از صفحهٔ [انتشارها (Releases)](../../releases) دریافت کنید.
+۱. تازه‌ترین فایل نصبی موجود را از صفحهٔ [انتشارها (Releases)](../../releases) دریافت کنید.
 ۲. فایل را اجرا کرده و مراحل نصب را تکمیل کنید.  
-۳. برنامه پس از نصب به‌صورت مستقیم از پوشهٔ محل نصب نیز قابل اجرا است.
+۳. برنامه پس از نصب از پوشهٔ محل نصب نیز قابل اجرا است.
 
 > [!NOTE]
-> **نکته:** پس از نصب نرم‌افزار، فایل Uninstall نیز در پوشه نصب قرار می‌گیرد که می‌توانید از آن برای حذف کامل و تمیز نرم‌افزار استفاده کنید.
+> **نکته:** اگر برنامه در مسیر انتخاب‌شده باز باشد، نصاب می‌تواند درخواست خروج امن بدهد. بعد از نصب، فایل Uninstall در همان پوشه برای حذف برنامه در دسترس است.
 
 > [!IMPORTANT]
 > **توجه:** فایل‌ها و وابستگی‌های همراه فایل اجرایی در پوشهٔ نصب را به هیچ‌وجه حذف یا جابه‌جا نکنید.
@@ -201,12 +193,12 @@ MAXI SOUNDSET is licensed under the [GNU General Public License v3.0](MaxiSoundS
 - 🎵 **نرم‌سازی و بهبود کیفیت صدا:** اصلاح خروجی صدا، نرم‌سازی فرکانس‌های بالای گوش‌خراش (Treble) و ارتقای کلی کیفیت صوتی.
 - 🎛️ **اکولایزر اختصاصی:** دارای چندین پریست (Preset) آماده به همراه سیستم تنظیم دستی کامل اکولایزر.
 - 📊 **مانیتور لحظه‌ای صدا:** نمایش زنده و در لحظه سطح صدای ورودی و خروجی.
-- ⚡ **عملکرد بالا و مصرف بهینه منابع:** توسعه‌یافته با زبان برنامه‌نویسی Rust برای رسیدن به بالاترین سرعت و کمترین میزان مصرف رم.
+- 🖱️ **کنترل از کنار ساعت:** با اسکرول روی آیکون، ولوم را تنظیم کنید. از منوی همان آیکون هم می‌توانید داشبورد را باز کنید یا پخش را کنترل کنید.
 - 🎮 **کلیدهای میانبر سراسری (Global Hotkeys):** امکان تنظیم و تغییر میانبرهای سفارشی برای دسترسی سریع به تنظیمات صوتی از داخل سایر برنامه‌ها یا بازی‌ها.
 - 🛠️ **رفع تداخل‌های صوتی:** ابزارهای داخلی برای بستن یا رفع مشکلات احتمالی در مسیردهی صدا.
-- 🎧 **مدیریت دستگاه خروجی:** انتخاب و مدیریت آسان هر دستگاه خروجی صدای فعال سیستم.
-- 🔀 **مسیردهی صوتی مجازی:** قابلیت انتقال اختیاری صدای پردازش‌شده به یک کابل مجازی جهت استفاده در ضبط و استریم زنده.
-- 🎛️ **کاملاً ماژولار:** تمامی قابلیت‌های ذکر شده در بالا را می‌توانید به دلخواه و بر اساس نیاز خود فعال یا غیرفعال کنید.
+- 🎧 **دستگاه‌های خروجی:** خروجی را انتخاب کنید و بعد از اتصال دوبارهٔ دستگاه، در صورت نیاز فهرست را تازه کنید.
+- 🔀 **هدایت صدا:** از کنترل ولوم ویندوز استفاده کنید یا برای پردازش از طریق کابل مجازی، حالت کامل را انتخاب کنید.
+- 🔔 **اعلان ولوم:** تغییر ولوم در یک اعلان کوچک و متحرک دیده می‌شود که وضعیت مکث یا توقف پردازش را هم روشن می‌کند.
 - 🚀 **یکپارچگی با ویندوز:** اجرای خودکار با شروع به کار سیستم و بازیابی آخرین وضعیت صوتی پس از ورود به حساب کاربری.
 - 🌍 **رابط کاربری دو زبانه:** پشتیبانی کامل از رابط فارسی (راست‌چین) و انگلیسی (چپ‌چین).
 
@@ -227,13 +219,13 @@ MAXI SOUNDSET is licensed under the [GNU General Public License v3.0](MaxiSoundS
 ## 🛠️ عیب‌یابی و سوالات متداول
 
 **صدای خروجی قطع شده است؟**
-اگر صدای سیستم قطع شد، مطمئن شوید که دستگاه خروجی صحیحی را در نرم‌افزار انتخاب کرده‌اید. برای بررسی اینکه آیا مشکل از ویندوز است یا خیر، موقتاً نرم‌افزار را غیرفعال کنید و ببینید آیا صدای استاندارد ویندوز را دریافت می‌کنید.
+دستگاه پخش انتخاب‌شده را بررسی کنید. اگر هدفون تازه دوباره وصل شده، فهرست خروجی‌ها را تازه کنید و در صورت نیاز دوباره آن را انتخاب کنید.
 
 **نرم‌افزار را بسته‌اید ولی هنوز صدا ندارید؟**
 گاهی اوقات با بستن نرم‌افزار، ویندوز همچنان دستگاه پخش پیش‌فرض را روی «کابل مجازی» نگه می‌دارد. برای رفع سریع این مشکل، روی آیکون صدا در نوار وظیفه (تسک‌بار) ویندوز کلیک کرده و خروجی را دوباره روی اسپیکر یا هدفون اصلی خود تنظیم کنید.
 
 **انتخاب ورودی‌های صدا:**
-نرم‌افزار به شما امکان تغییر و انتخاب مسیر ورودی صدا را می‌دهد. اگر از قبل مسیری را در ویندوز پیکربندی کرده‌اید، می‌توانید ورودی نرم‌افزار را مستقیماً روی پیش‌فرض ویندوز (Default) قرار دهید.
+در حالت کامل، راهنمای کنار «ورودی مجازی» تفاوت ورودی‌های کابل را توضیح می‌دهد.
 
 **تنظیمات مسیردهی کابل مجازی (Virtual cable routing):**
 مطمئن شوید که این گزینه در نرم‌افزار روی حالت *Automatic* (خودکار) تنظیم شده باشد؛ مگر اینکه از یک ورودی صدای متفاوت استفاده می‌کنید و نیاز دارید آن را به‌صورت دستی تنظیم کنید.
