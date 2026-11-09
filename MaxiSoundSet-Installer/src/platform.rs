@@ -551,6 +551,23 @@ pub fn test_set_startup(s: &str) -> Result<()> {
     put(RUN_KEY, "MaxiSoundSet", Some(&string(s)))
 }
 
+/// Read only the private native fixture keys, including exact registry types/bytes.
+#[cfg(test)]
+pub(crate) fn test_native_registry_record() -> Result<serde_json::Value> {
+    let prefix = TEST_SCOPE.with(|scope| scope.borrow().as_ref().map(|(prefix, _)| prefix.clone()))
+        .context("Native registry evidence requires an active TestScope")?;
+    ensure!(TEST_NATIVE.with(std::cell::Cell::get), "Native registry evidence requires native=true");
+    let uninstall = key_path(UNINSTALL_KEY);
+    let run = key_path(RUN_KEY);
+    ensure!(uninstall == format!("{prefix}\\Uninstall") && run == format!("{prefix}\\Run")
+        && prefix.starts_with("Software\\MAXISOUNDSETInstallerTests\\"), "Registry evidence is not isolated");
+    let snapshot = Snapshot::capture()?;
+    let values: Vec<_> = snapshot.values.iter().map(|(key, name, value)| {
+        serde_json::json!({"key":key_path(key),"name":name,"value":value.as_ref().map(|v|serde_json::json!({"kind":v.kind.0,"bytes":v.bytes}))})
+    }).collect();
+    Ok(serde_json::json!({"uninstall_key":uninstall,"run_key":run,"existed":snapshot.existed,"values":values}))
+}
+
 pub fn cleanup_temp_helper() -> Result<()> {
     use windows::Win32::{Foundation::CloseHandle, Storage::FileSystem::*};
     let exe = std::env::current_exe()?;
@@ -602,4 +619,59 @@ thread_local! { static FAIL_REGISTER: std::cell::Cell<bool> = const { std::cell:
 pub fn test_fail_registration_once() {
     assert!(TEST_SCOPE.with(|s| s.borrow().is_some()));
     FAIL_REGISTER.with(|f| f.set(true));
+}
+
+/// Exact, allowlisted ten-value journal for the opt-in live updater trial.
+/// This is not a whole-key snapshot and never deletes a registry key.
+#[cfg(test)]
+impl Snapshot {
+    pub(crate) fn trial_record(&self) -> serde_json::Value {
+        serde_json::json!({"existed":self.existed,"values":self.values.iter().map(|(key,name,value)|
+            serde_json::json!({"key":key,"name":name,"value":value.as_ref().map(|v|serde_json::json!({"kind":v.kind.0,"bytes":v.bytes}))})).collect::<Vec<_>>()})
+    }
+    pub(crate) fn trial_from_record(record: &serde_json::Value) -> Result<Self> {
+        #[derive(serde::Deserialize)] #[serde(deny_unknown_fields)] struct Raw { kind:u32, bytes:Vec<u8> }
+        #[derive(serde::Deserialize)] #[serde(deny_unknown_fields)] struct Entry { key:String, name:String, value:Option<Raw> }
+        #[derive(serde::Deserialize)] #[serde(deny_unknown_fields)] struct Record { existed:bool, values:Vec<Entry> }
+        let record: Record = serde_json::from_value(record.clone())?;
+        ensure!(record.existed && record.values.len() == NAMES.len()+1, "Trial requires an existing uninstall key and exactly ten selected values");
+        let allowed: Vec<_> = NAMES.iter().map(|name|(UNINSTALL_KEY,*name)).chain([(RUN_KEY,"MaxiSoundSet")]).collect();
+        let mut values = Vec::new();
+        for (entry,(key,name)) in record.values.into_iter().zip(allowed) {
+            ensure!(entry.key == key && entry.name == name, "Trial journal contains a key/name outside its fixed write-set");
+            ensure!(entry.value.as_ref().is_none_or(|v|v.bytes.len()<=65536), "Trial registry value is oversized");
+            values.push((entry.key,entry.name,entry.value.map(|v|Value {kind:REG_VALUE_TYPE(v.kind),bytes:v.bytes})));
+        }
+        Ok(Self {existed:true,values})
+    }
+    fn trial_restore_with(&self, mut write:impl FnMut(&str,&str,Option<&Value>)->Result<()>) -> Result<()> {
+        ensure!(self.existed, "Trial refuses restoration without an existing baseline key");
+        let mut errors=Vec::new();
+        for (key,name,value) in &self.values { if let Err(error)=write(key,name,value.as_ref()) {errors.push(format!("{name}: {error:#}"));} }
+        ensure!(errors.is_empty(), "Selected-value restoration incomplete: {}",errors.join("; ")); Ok(())
+    }
+    pub(crate) fn trial_restore_all(&self) -> Result<()> { self.trial_restore_with(put) }
+}
+
+#[cfg(test)]
+mod live_trial_journal_tests {
+    use super::*;
+    #[test]
+    fn trial_snapshot_roundtrip_whitelist_and_all_value_restore_are_isolated() -> Result<()> {
+        let root=std::env::temp_dir().join(format!("trial-registry-{}",crate::operations::nonce()));
+        let _scope=TestScope::new(&root,false)?;
+        register(&root,"1.0.3",true,123)?;
+        let mut original=Snapshot::capture()?; original.existed=true; // emulated registry has no native key.
+        let record=original.trial_record();
+        let restored=Snapshot::trial_from_record(&record)?;
+        register(&root,"9.9.9",false,999)?; restored.trial_restore_all()?;
+        let mut actual=Snapshot::capture()?; actual.existed=true;
+        ensure!(actual.trial_record()==record,"Raw selected-value roundtrip differs");
+        let mut attempts=0;
+        let failure=restored.trial_restore_with(|key,name,value| {attempts+=1;if attempts==1 {anyhow::bail!("controlled first-value failure");} put(key,name,value)});
+        ensure!(failure.is_err() && attempts==10,"Restoration must attempt all ten values after a failure");
+        for field in ["key","name"] {let mut bad=record.clone();bad["values"][0][field]=serde_json::json!("unrelated");ensure!(Snapshot::trial_from_record(&bad).is_err(),"Unallowlisted entry accepted");}
+        let mut missing=record.clone();missing["existed"]=serde_json::json!(false);ensure!(Snapshot::trial_from_record(&missing).is_err(),"Missing baseline key accepted");
+        Ok(())
+    }
 }

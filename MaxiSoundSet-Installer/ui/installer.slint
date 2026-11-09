@@ -1,33 +1,35 @@
 import "../../MaxiSoundSet-Rust/assets/Vazir.ttf";
 import "../../MaxiSoundSet-Rust/assets/Vazir-Bold.ttf";
-import { ScrollView, ListView, CheckBox, ComboBox, LineEdit, ProgressIndicator } from "std-widgets.slint";
+import { ScrollView, CheckBox, ComboBox, LineEdit, ProgressIndicator } from "std-widgets.slint";
 export struct Term { heading: string, body: string }
 export struct PlaybackOutput { id: string, name: string }
+export struct InstallerBounds { x: length, y: length, width: length, height: length }
 component Button inherits Rectangle {
  in property<string> text;
  in property<bool> enabled: true;
  in property<bool> danger: false;
+ in property<bool> primary: false;
  callback clicked();
- height: 44px; min-width: 114px; max-width: 140px; preferred-width: 124px; horizontal-stretch: 0;
+ height: 42px; min-width: 110px; max-width: 124px; preferred-width: 116px; horizontal-stretch: 0;
  background: transparent;
  property<float> visual-scale: !root.enabled ? 1 : hover.pressed ? 0.98 : hover.has-hover ? 1.02 : 1;
  animate visual-scale { duration: 150ms; easing: cubic-bezier(0.16, 1, 0.3, 1); }
  Rectangle {
   x: (root.width - self.width)/2; y: (root.height - self.height)/2;
-  width: root.width*root.visual-scale; height: root.height*root.visual-scale; border-radius: 17px;
-  background: !root.enabled ? #152038 : root.danger ? (hover.has-hover ? #77343f : #572832) : hover.pressed ? #00112d : hover.has-hover ? #0b3152 : #00193f;
-  border-width: 1px; border-color: root.enabled ? (root.danger ? #bc5869 : hover.has-hover ? #80d9e9 : #588ea9) : #29384c;
+  width: root.width*root.visual-scale; height: root.height*root.visual-scale; border-radius: 12px;
+  background: !root.enabled ? #152038 : root.danger ? (hover.has-hover ? #68374a : #532d3b) : hover.pressed ? #06132d : hover.has-hover ? #0b2b58 : root.primary ? #173b69 : #00193f;
+  border-width: 1px; border-color: root.enabled ? (root.danger ? #8a5368 : hover.has-hover ? #74aaf1 : root.primary ? #527fb9 : #263e62) : #29384c;
   drop-shadow-color: root.enabled && hover.has-hover ? (root.danger ? #dc667940 : #69d4e840) : transparent;
   drop-shadow-blur: 16px;
   animate background, border-color, drop-shadow-color { duration: 160ms; easing: ease-out; }
  }
- Text { width: parent.width; height: parent.height; text: root.text; y: hover.pressed ? 1px : 0px; animate y { duration: 100ms; } color: root.enabled ? #f3fcff : #77899e; font-size: 15px; horizontal-alignment: center; vertical-alignment: center; }
+ Text { width: parent.width; height: parent.height; text: root.text; y: hover.pressed ? 1px : 0px; animate y { duration: 100ms; } color: root.enabled ? (root.danger ? #ffdce2 : #eff5ff) : #77899e; font-size: 15px; horizontal-alignment: center; vertical-alignment: center; }
  forward-focus: focus;
  accessible-role: button; accessible-label: root.text; accessible-enabled: root.enabled;
  accessible-action-default => { if root.enabled { root.clicked(); } }
  focus := FocusScope { enabled: root.enabled; key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.clicked(); return accept; } return reject; } }
  hover := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { focus.focus(); root.clicked(); } }
- if focus.has-focus: Rectangle { background: transparent; border-radius: 17px; border-width: 1px; border-color: #96e6f0; }
+ if root.enabled && focus.has-focus: Rectangle { background: transparent; border-radius: 12px; border-width: 1px; border-color: #74aaf1; }
 }
 component BilingualCheckBox inherits Rectangle {
  in property<bool> english: false;
@@ -35,19 +37,21 @@ component BilingualCheckBox inherits Rectangle {
  in property<bool> enabled: true;
  in-out property<bool> checked;
  background: transparent;
- min-height: 24px; preferred-height: 24px;
+ min-height: 24px; preferred-height: 24px; vertical-stretch: 0;
  min-width: 0px; max-width: 10000px; horizontal-stretch: 1;
  forward-focus: box;
- box := CheckBox { x: root.english ? 0px : root.width - self.width; y: (root.height - self.height)/2; width: 24px; height: 24px; min-width: 24px; max-width: 24px; min-height: 24px; max-height: 24px; text: ""; checked <=> root.checked; enabled: root.enabled; accessible-label: root.text; }
+ out property<InstallerBounds> visual-box-bounds: { x: box.absolute-position.x, y: box.absolute-position.y, width: box.width, height: box.height };
+ out property<bool> visual-box-focused: box.has-focus;
+ box := CheckBox { x: root.english ? 3px : root.width - 21px; y: (root.height - self.height)/2; width: 18px; height: 18px; min-width: 18px; max-width: 18px; min-height: 18px; max-height: 18px; text: ""; checked <=> root.checked; enabled: root.enabled; accessible-label: root.text; }
  Text { x: root.english ? 30px : 0px; width: max(0px, root.width - 30px); height: root.height; text: root.text; color: root.enabled ? #d4deec : #77899e; wrap: word-wrap; horizontal-alignment: root.english ? left : right; vertical-alignment: center; accessible-role: none; }
  TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { box.focus(); root.checked = !root.checked; } }
 }
 export component InstallerWindow inherits Window {
  title: root.english ? (root.uninstall ? "MAXI SOUNDSET Uninstaller" : "MAXI SOUNDSET Installer") : (root.uninstall ? "حذف MAXI SOUNDSET" : "نصب MAXI SOUNDSET");
  icon: @image-url("../../MaxiSoundSet-Rust/assets/icon.png");
- preferred-width: 960px; preferred-height: 720px; min-width: 860px; min-height: 650px;
+ preferred-width: 960px; preferred-height: 680px; min-width: 800px; min-height: 520px;
  default-font-family: "Vazir"; default-font-size: 14px;
- background: @linear-gradient(150deg, #090e22 0%, #00193f 100%);
+ background: #090e22;
  in-out property<bool> english: false;
  in property<bool> uninstall: false;
  in-out property<int> step: 0;
@@ -75,6 +79,8 @@ export component InstallerWindow inherits Window {
  in property<bool> busy: false;
  in property<bool> app-running: false;
  in property<bool> closing-app: false;
+ property<bool> waiting-for-app: root.app-running || root.closing-app;
+ property<bool> can-edit-install-path: root.step == 2 && !root.uninstall && !root.busy && !root.closing-app;
  in property<float> progress: 0;
  in property<string> message;
  in property<string> error;
@@ -88,100 +94,172 @@ export component InstallerWindow inherits Window {
  property<float> page-reveal: root.motion-ready ? 1 : 0;
  animate page-reveal { duration: root.motion-ready ? 240ms : 0ms; easing: cubic-bezier(0.16, 1, 0.3, 1); }
  out property<float> page-motion-progress: root.page-reveal;
- changed step => { root.motion-ready = false; }
- changed english => { root.motion-ready = false; }
+ changed step => { root.motion-ready = false; page-scroll.content-y = 0px; }
+ changed english => { root.motion-ready = false; page-scroll.content-y = 0px; }
+ changed install-path => { root.install-path-changed(); }
  Timer { interval: 16ms; running: !root.motion-ready; triggered => { root.motion-ready = true; } }
  callback language-changed(); callback browse(); callback next(); callback back(); callback cancel();
  callback close-app();
- Rectangle { x: 6px; y: 6px; width: root.width - 12px; height: root.height - 12px; border-radius: 22px; border-width: 1px; border-color: #65b2ca70; background: transparent; }
- VerticalLayout { padding: 24px; spacing: 18px;
-  HorizontalLayout { height: 54px; spacing: 16px;
-   Rectangle { width: 50px; height: 50px; border-radius: 25px; border-width: 1px; border-color: #70c2d9; background: #00193f;
-    Image { source: @image-url("../../MaxiSoundSet-Rust/assets/sidebar-logo.svg"); width: 42px; height: 42px; x: 4px; y: 4px; image-fit: contain; }
+ callback install-path-changed();
+ // Read-only geometry for software-rendered visual and input verification.
+ out property<InstallerBounds> visual-card-bounds: { x: main-card.absolute-position.x, y: main-card.absolute-position.y, width: main-card.width, height: main-card.height };
+ out property<InstallerBounds> visual-footer-bounds: { x: footer.absolute-position.x, y: footer.absolute-position.y, width: footer.width, height: footer.height };
+ out property<InstallerBounds> visual-primary-bounds: { x: primary-action.absolute-position.x, y: primary-action.absolute-position.y, width: primary-action.width, height: primary-action.height };
+ out property<InstallerBounds> visual-logo-bounds: { x: brand-logo.absolute-position.x, y: brand-logo.absolute-position.y, width: brand-logo.width, height: brand-logo.height };
+ out property<InstallerBounds> visual-language-bounds: { x: language-action.absolute-position.x, y: language-action.absolute-position.y, width: language-action.width, height: language-action.height };
+ out property<InstallerBounds> visual-cancel-bounds: { x: cancel-action.absolute-position.x, y: cancel-action.absolute-position.y, width: cancel-action.width, height: cancel-action.height };
+ out property<InstallerBounds> visual-back-bounds: { x: back-action.absolute-position.x, y: back-action.absolute-position.y, width: back-action.width, height: back-action.height };
+ out property<length> visual-page-scroll-range: max(0px, page-scroll.content-height - page-scroll.visible-height);
+ out property<length> visual-page-scroll-y: page-scroll.content-y;
+ out property<length> visual-content-height: page-scroll.content-height;
+ out property<length> visual-page-height: page-content.height;
+ out property<length> visual-page-preferred-height: page-content.preferred-height;
+ out property<length> visual-status-preferred-height: status-content.preferred-height;
+ out property<InstallerBounds> visual-status-bounds: { x: status-content.absolute-position.x, y: status-content.absolute-position.y, width: status-content.width, height: status-content.height };
+ out property<InstallerBounds> visual-error-bounds: { x: error-tail.absolute-position.x, y: error-tail.absolute-position.y, width: error-tail.width, height: error-tail.height };
+ out property<InstallerBounds> visual-warning-bounds: { x: close-warning.absolute-position.x, y: close-warning.absolute-position.y, width: close-warning.width, height: close-warning.height };
+ out property<InstallerBounds> visual-close-bounds: { x: close-action.absolute-position.x, y: close-action.absolute-position.y, width: close-action.width, height: close-action.height };
+ out property<InstallerBounds> visual-agreement-viewport-bounds: { x: agreement-list.absolute-position.x, y: agreement-list.absolute-position.y, width: agreement-list.visible-width, height: agreement-list.visible-height };
+ out property<InstallerBounds> visual-agreement-content-bounds: { x: agreement-content.absolute-position.x, y: agreement-content.absolute-position.y, width: agreement-content.width, height: agreement-content.height };
+ out property<InstallerBounds> visual-consent-bounds: { x: consent-row.absolute-position.x, y: consent-row.absolute-position.y, width: consent-row.width, height: consent-row.height };
+ out property<InstallerBounds> visual-consent-box-bounds: consent-row.visual-box-bounds;
+ out property<bool> visual-consent-focused: consent-row.visual-box-focused;
+ out property<InstallerBounds> visual-delete-data-bounds: { x: delete-data-row.absolute-position.x, y: delete-data-row.absolute-position.y, width: delete-data-row.width, height: delete-data-row.height };
+ out property<InstallerBounds> visual-delete-data-box-bounds: delete-data-row.visual-box-bounds;
+ out property<bool> visual-delete-data-focused: delete-data-row.visual-box-focused;
+ out property<InstallerBounds> visual-page-viewport-bounds: { x: page-scroll.absolute-position.x, y: page-scroll.absolute-position.y, width: page-scroll.visible-width, height: page-scroll.visible-height };
+ out property<InstallerBounds> visual-page-content-bounds: { x: page-content.absolute-position.x, y: page-content.absolute-position.y, width: page-content.width, height: page-content.height };
+ out property<InstallerBounds> visual-path-bounds: { x: path-edit.absolute-position.x, y: path-edit.absolute-position.y, width: path-edit.width, height: path-edit.height };
+ out property<InstallerBounds> visual-paste-bounds: { x: paste-path.absolute-position.x, y: paste-path.absolute-position.y, width: paste-path.width, height: paste-path.height };
+ out property<InstallerBounds> visual-browse-bounds: { x: browse-path.absolute-position.x, y: browse-path.absolute-position.y, width: browse-path.width, height: browse-path.height };
+ // Fluent's 14px scrollbar overlays the viewport; keep 18px beyond that lane.
+ property<length> scroll-gutter: 32px;
+ VerticalLayout { padding: 24px; spacing: 20px;
+  FlexboxLayout { alignment: stretch; height: 48px; flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; spacing: 14px;
+   brand-logo := Image { layout-order: root.english ? 0 : 2; width: 44px; height: 44px; source: @image-url("../../MaxiSoundSet-Rust/assets/sidebar-logo.svg"); image-fit: contain; }
+   VerticalLayout { layout-order: 1; horizontal-stretch: 1; min-width: 0px; max-width: 10000px; spacing: 0px;
+    Text { text: "MAXI SOUNDSET"; color: #eff5ff; font-weight: 700; font-size: 20px; horizontal-alignment: root.english ? left : right; }
+    Text { text: root.english ? (root.uninstall ? "Uninstaller" : "Installer") : (root.uninstall ? "حذف برنامه" : "نصب برنامه"); color: #a4b6d2; font-size: 13px; horizontal-alignment: root.english ? left : right; }
    }
-   VerticalLayout { spacing: 1px;
-    Text { text: "MAXI SOUNDSET"; color: #f3fcff; font-weight: 800; font-size: 24px; horizontal-alignment: root.english ? left : right; }
-    Text { text: root.english ? (root.uninstall ? "Uninstaller" : "Installer") : (root.uninstall ? "حذف برنامه" : "نصب برنامه"); color: #a5bdd2; horizontal-alignment: root.english ? left : right; }
-   }
-   Button { text: root.english ? "فارسی / FA" : "English / EN"; width: 130px; enabled: !root.busy; clicked => { root.english = !root.english; root.language-changed(); } }
+   language-action := Button { layout-order: root.english ? 2 : 0; text: root.english ? "فارسی / FA" : "English / EN"; enabled: !root.busy; clicked => { root.english = !root.english; root.language-changed(); } }
   }
-  FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; spacing: 22px;
-   Rectangle { layout-order: root.english ? 0 : 1; width: 188px; background: transparent;
-    VerticalLayout { padding-top: 26px; spacing: 12px; alignment: start;
-     for name[i] in [root.english ? "Welcome" : "خوش‌آمدید", root.english ? (root.uninstall ? "Review" : "Agreement") : (root.uninstall ? "بررسی حذف" : "توافق‌نامه"), root.english ? "Choose location" : "انتخاب مسیر", root.english ? (root.uninstall ? "Removing" : "Installing") : (root.uninstall ? "حذف" : "نصب"), root.english ? "Finish" : "پایان"]: Rectangle {
-      visible: !root.uninstall || i != 2; height: root.uninstall && i == 2 ? 0px : 64px; border-radius: 24px;
-      background: root.step == i ? #213a51 : transparent;
-      border-width: 1px; border-color: root.step == i ? #478cac : transparent;
-      animate border-color { duration: 200ms; easing: ease-out; }
-      Rectangle { width: 3px; height: parent.height - 20px; y: 10px; x: root.english ? 0px : parent.width - 3px; border-radius: 2px; background: #69d4e8; opacity: root.step == i ? 1 : 0; animate opacity { duration: 200ms; } }
-      HorizontalLayout { padding: 12px; spacing: 12px;
-       Rectangle { width: 26px; background: transparent;
-        Image { width: 26px; height: 26px; y: (parent.height - 26px)/2; visible: root.step <= i; image-fit: contain; colorize: root.step == i ? #69d4e8 : #72869f;
-         source: i == 0 ? @image-url("../assets/step-welcome.svg") : i == 1 ? @image-url("../assets/nav-log.svg") : i == 2 ? @image-url("../assets/step-folder.svg") : i == 3 ? @image-url("../assets/nav-settings.svg") : @image-url("../assets/step-finish.svg");
-        }
-        Text { text: "✓"; visible: root.step > i; color: #69d4e8; vertical-alignment: center; horizontal-alignment: center; }
+  FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; spacing: 20px;
+   Rectangle { layout-order: root.english ? 0 : 1; width: 152px; background: transparent;
+    VerticalLayout { padding-top: 16px; spacing: 8px; alignment: start;
+     for name[i] in [root.english ? "Welcome" : "خوش‌آمدید", root.english ? (root.uninstall ? "Review" : "Agreement") : (root.uninstall ? "بررسی حذف" : "توافق‌نامه"), root.english ? "Location" : "مسیر نصب", root.english ? (root.uninstall ? "Removing" : "Installing") : (root.uninstall ? "حذف" : "نصب"), root.english ? "Finish" : "پایان"]: Rectangle {
+      visible: !root.uninstall || i != 2; height: root.uninstall && i == 2 ? 0px : 44px; border-radius: 12px;
+      background: root.step == i ? #1b2c46 : transparent;
+      Rectangle { x: root.english ? 12px : parent.width - 32px; y: 12px; width: 20px; height: 20px; background: transparent;
+       Image { width: 20px; height: 20px; visible: root.step <= i && i != 4; image-fit: contain; colorize: root.step == i ? #74aaf1 : #72869f;
+        source: i == 0 ? @image-url("../assets/step-welcome.svg") : i == 1 ? @image-url("../assets/nav-log.svg") : i == 2 ? @image-url("../assets/step-folder.svg") : @image-url("../assets/nav-settings.svg");
        }
-       Text { text: name; color: root.step == i ? #f3fcff : #91a4bf; font-weight: root.step == i ? 700 : 400; vertical-alignment: center; horizontal-alignment: root.english ? left : right; }
+       Text { text: "✓"; visible: root.step > i || i == 4; color: root.step >= i ? #74aaf1 : #72869f; vertical-alignment: center; horizontal-alignment: center; }
       }
+      Text { x: root.english ? 42px : 12px; width: parent.width - 54px; height: parent.height; text: name; color: root.step == i ? #eff5ff : #a4b6d2; font-weight: root.step == i ? 700 : 400; vertical-alignment: center; horizontal-alignment: root.english ? left : right; }
+
      }
     }
    }
-   Rectangle { layout-order: root.english ? 1 : 0; horizontal-stretch: 1; min-width: 602px; max-width: 10000px; border-radius: 30px; border-width: 1px; border-color: #395770;
-    background: #16233ae8;
+   main-card := Rectangle { layout-order: root.english ? 1 : 0; horizontal-stretch: 1; min-width: 0px; max-width: 10000px; background: transparent;
+    // Decoration fills the measured card; its intrinsic aspect ratio must not measure that same card.
+    Image { width: parent.width; height: parent.height; preferred-width: 0px; preferred-height: 0px; source: @image-url("../../MaxiSoundSet-Rust/assets/surface-modal.png", nine-slice(26)); }
     Rectangle { background: transparent; y: (1 - root.page-reveal)*8px; width: parent.width; height: parent.height; opacity: root.page-reveal;
-    VerticalLayout { padding: 26px; spacing: 14px;
-     if root.step == 0: VerticalLayout { alignment: center; spacing: 20px;
-      HorizontalLayout { height: 170px; Rectangle { horizontal-stretch: 1; background: transparent; } Rectangle { height: 170px; width: 170px; border-radius: 85px; border-width: 2px; border-color: #69afc9; background: #00193f;
-       Image { source: @image-url("../../MaxiSoundSet-Rust/assets/sidebar-logo.svg"); width: 145px; height: 145px; x: 12.5px; y: 12.5px; image-fit: contain; }
-      } Rectangle { horizontal-stretch: 1; background: transparent; } }
-      Text { text: root.english ? (root.uninstall ? "Remove MAXI SOUNDSET" : "Welcome to MAXI SOUNDSET") : (root.uninstall ? "حذف MAXI SOUNDSET" : "به نصب MAXI SOUNDSET خوش‌آمدید"); wrap: word-wrap; color: #f3fcff; font-size: 23px; font-weight: 700; horizontal-alignment: center; }
-      Text { text: root.version-label; color: #a9c4d8; font-size: 18px; horizontal-alignment: center; }
-      Text { text: "MaxiSpace.dev  ·  2026"; color: #a5e5ed; font-size: 15px; horizontal-alignment: center; }
-      Text { text: root.english ? "All rights to this application belong to MaxiSpace.dev." : "تمامی حقوق این نرم‌افزار متعلق به برند MaxiSpace.dev است."; color: #a5b7ce; font-size: 12px; wrap: word-wrap; horizontal-alignment: center; }
-      Text { text: root.english ? (root.uninstall ? "Review the files and preferences before removing the application." : "Better sound for you.\nAll application files are included in this installer.") : (root.uninstall ? "پیش از حذف، مسیر نصب و تنظیمات را بررسی کن." : "صدای بهتر برای تو\nتمام فایل‌های برنامه در همین نصاب قرار دارند."); color: #a5b7ce; wrap: word-wrap; horizontal-alignment: center; }
-     }
-     if root.step == 1 && !root.uninstall: VerticalLayout { spacing: 12px;
-      Text { text: root.english ? "Terms and agreement" : "شرایط و توافق‌نامه"; color: #f3fcff; font-size: 23px; font-weight: 700; horizontal-alignment: root.english ? left : right; }
-      Text { text: root.english ? "Full agreement · Scroll to read all 6 sections" : "متن کامل توافق‌نامه · برای مطالعهٔ هر ۶ بخش، به پایین اسکرول کنید"; color: #91a9c1; font-size: 11px; horizontal-alignment: root.english ? left : right; }
-      agreement-list := ListView { vertical-stretch: 1; content-y <=> root.agreement-scroll-y;
+     VerticalLayout { padding: 24px; spacing: root.step == 1 && !root.uninstall ? 12px : 0px;
+     agreement-page := VerticalLayout { visible: root.step == 1 && !root.uninstall; min-height: 0px; max-height: self.visible ? 10000px : 0px; spacing: 12px; vertical-stretch: self.visible ? 1 : 0;
+      Text { text: root.english ? "Terms and agreement" : "شرایط و توافق‌نامه"; color: #f3fcff; font-size: 22px; font-weight: 700; horizontal-alignment: root.english ? left : right; }
+      Text { text: root.english ? "Full agreement · Scroll to read all 6 sections" : "متن کامل توافق‌نامه · برای مطالعهٔ هر ۶ بخش، به پایین اسکرول کنید"; color: #91a9c1; font-size: 13px; horizontal-alignment: root.english ? left : right; }
+      agreement-list := ScrollView { vertical-stretch: 1; content-y <=> root.agreement-scroll-y;
        changed content-height => { root.agreement-content-height = self.content-height; }
        changed visible-height => { root.agreement-visible-height = self.visible-height; }
-       for item in root.terms: VerticalLayout { width: agreement-list.visible-width - 14px; padding-left: 10px; padding-right: 10px; padding-bottom: 16px; spacing: 6px;
-        if item.heading != "": Text { property<bool> end-marker: item.heading == (root.english ? "End of agreement" : "پایان توافق‌نامه"); width: parent.width; text: item.heading; color: self.end-marker ? #69d4e8 : #a5e5ed; font-size: self.end-marker ? 11px : 14px; font-weight: 700; wrap: word-wrap; horizontal-alignment: self.end-marker ? center : (root.english ? left : right); }
-        if item.body != "": Text { width: parent.width; text: item.body; color: #d4deec; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
+       agreement-content := VerticalLayout { x: 0px; width: agreement-list.visible-width - root.scroll-gutter; spacing: 0px;
+       for item in root.terms: Rectangle { width: parent.width; height: term-content.preferred-height; background: transparent;
+        term-content := VerticalLayout { width: parent.width; height: self.preferred-height; padding-left: 10px; padding-right: 0px; padding-bottom: 16px; spacing: 6px;
+        if item.heading != "": Text { property<bool> end-marker: item.heading == (root.english ? "End of agreement" : "پایان توافق‌نامه"); width: parent.width - 10px; text: item.heading; color: self.end-marker ? #69d4e8 : #a5e5ed; font-size: self.end-marker ? 11px : 14px; font-weight: 700; wrap: word-wrap; horizontal-alignment: self.end-marker ? center : (root.english ? left : right); }
+        if item.body != "": Text { width: parent.width - 10px; text: item.body; color: #d4deec; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
+        }
        }
       }
-      BilingualCheckBox { english: root.english; text: root.english ? "I have read and accept this agreement" : "توافق‌نامه را خوانده‌ام و می‌پذیرم"; checked <=> root.accepted; }
+      }
+      consent-row := BilingualCheckBox { english: root.english; text: root.english ? "I have read and accept this agreement" : "توافق‌نامه را خوانده‌ام و می‌پذیرم"; checked <=> root.accepted; }
      }
-     if root.step == 2 && !root.uninstall: VerticalLayout { spacing: 18px; alignment: start;
+      page-scroll := ScrollView { content-height: max(self.visible-height, page-content.preferred-height); visible: !(root.step == 1 && !root.uninstall); min-height: 0px; max-height: root.step == 1 && !root.uninstall ? 0px : 10000px; vertical-stretch: root.step == 1 && !root.uninstall ? 0 : 1;
+       page-content := VerticalLayout { x: 0px; width: page-scroll.visible-width - root.scroll-gutter; spacing: 0px; alignment: start;
+       close-warning := Rectangle { visible: root.waiting-for-app && (root.uninstall ? root.step == 1 : root.step == 2); height: self.visible ? warning-content.preferred-height : 0px; clip: true; border-radius: 18px; background: #22243a; border-width: 1px; border-color: #ffb07480;
+        warning-content := VerticalLayout { width: parent.width; height: self.preferred-height; padding: 15px; padding-bottom: 18px; spacing: 10px;
+         Text {
+          text: root.closing-app ? (root.english ? "Waiting for safe shutdown and audio restoration…" : "در انتظار خروج امن و بازگردانی وضعیت صدا…")
+              : root.uninstall ? (root.english ? "MAXI SOUNDSET is running. Close it before removing the application or its data." : "نرم‌افزار MAXI SOUNDSET باز است. پیش از حذف برنامه یا داده‌های آن، نرم‌افزار را ببند.")
+              : (root.english ? "MAXI SOUNDSET is running. Close it before installing or updating the application." : "نرم‌افزار MAXI SOUNDSET باز است. پیش از نصب یا به‌روزرسانی، آن را ببند.");
+          color: #ffbe8d; wrap: word-wrap; horizontal-alignment: root.english ? left : right;
+         }
+         HorizontalLayout { height: 42px;
+          if !root.english: Rectangle { horizontal-stretch: 1; max-width: 10000px; background: transparent; }
+          close-action := Button { text: root.english ? "Close software" : "بستن نرم‌افزار"; enabled: close-warning.visible && !root.busy && !root.closing-app; clicked => { root.close-app(); } }
+          if root.english: Rectangle { horizontal-stretch: 1; max-width: 10000px; background: transparent; }
+         }
+        }
+       }
+     if root.step == 0: Rectangle { background: transparent; height: max(page-scroll.visible-height, welcome-content.preferred-height);
+      welcome-content := VerticalLayout { width: parent.width; height: self.preferred-height; y: max(0px, (parent.height - self.height)/2); spacing: 14px;
+      HorizontalLayout { height: 80px; Rectangle { horizontal-stretch: 1; background: transparent; } Image { source: @image-url("../../MaxiSoundSet-Rust/assets/sidebar-logo.svg"); height: 80px; width: 80px; image-fit: contain; } Rectangle { horizontal-stretch: 1; background: transparent; } }
+      Text { text: root.english ? (root.uninstall ? "Remove MAXI SOUNDSET" : "Welcome to MAXI SOUNDSET") : (root.uninstall ? "حذف MAXI SOUNDSET" : "به نصب MAXI SOUNDSET خوش‌آمدید"); wrap: word-wrap; color: #f3fcff; font-size: 22px; font-weight: 700; horizontal-alignment: center; }
+      Text { text: root.english ? (root.uninstall ? "Review the files and preferences before removing the application." : "Better sound for you.\nAll application files are included in this installer.") : (root.uninstall ? "پیش از حذف، مسیر نصب و تنظیمات را بررسی کن." : "صدای بهتر برای تو\nتمام فایل‌های برنامه در همین نصاب قرار دارند."); color: #a5b7ce; wrap: word-wrap; horizontal-alignment: center; }
+      Text { text: "MaxiSpace.dev  ·  2026"; color: #a5e5ed; font-size: 15px; horizontal-alignment: center; }
+      Text { text: root.english ? "All rights to this application belong to MaxiSpace.dev." : "تمامی حقوق این نرم‌افزار متعلق به برند MaxiSpace.dev است."; color: #a5b7ce; font-size: 12px; wrap: word-wrap; horizontal-alignment: center; }
+     }
+      }
+     // Measure wrapped pages at their allocated width, rather than a conditional layout's intrinsic preferred width.
+     location-section := Rectangle { visible: root.step == 2 && !root.uninstall; height: self.visible ? location-content.preferred-height : 0px; background: transparent;
+      location-content := VerticalLayout { width: parent.width; height: self.preferred-height; padding-top: close-warning.visible ? 16px : 0px; spacing: 18px; alignment: start;
       Text { text: root.english ? (root.uninstall ? "Ready to remove" : "Choose installation location") : (root.uninstall ? "آماده حذف برنامه" : "انتخاب مسیر نصب"); color: #f3fcff; font-size: 22px; font-weight: 700; horizontal-alignment: root.english ? left : right; }
       Text { text: root.english ? "Location" : "مسیر"; color: #a6bed1; horizontal-alignment: root.english ? left : right; }
-      LineEdit { text <=> root.install-path; enabled: !root.uninstall; }
-      if !root.uninstall: Button { text: root.english ? "Browse…" : "انتخاب پوشه…"; clicked => { root.browse(); } }
-      if !root.uninstall: BilingualCheckBox { english: root.english; text: root.english ? "Create desktop shortcut" : "ساخت میان‌بر روی دسکتاپ"; checked <=> root.desktop-shortcut; }
-      if !root.uninstall: BilingualCheckBox { english: root.english; text: root.english ? "Start with Windows" : "اجرا هنگام روشن شدن ویندوز"; checked <=> root.startup; }
-      if root.uninstall: BilingualCheckBox { english: root.english; text: root.english ? "Also delete settings and logs" : "تنظیمات و لاگ‌ها هم حذف شوند"; checked <=> root.delete-data; }
-      if root.uninstall && root.app-running: Rectangle { min-height: 114px; border-radius: 18px; background: #22243a; border-width: 1px; border-color: #ffb07480;
-       VerticalLayout { padding: 15px; spacing: 10px;
-        Text { text: root.closing-app ? (root.english ? "Waiting for safe shutdown and audio restoration…" : "در انتظار خروج امن و بازگردانی وضعیت صدا…") : (root.english ? "MAXI SOUNDSET is running. Close it before removing the application or its data." : "نرم‌افزار MAXI SOUNDSET باز است. پیش از حذف برنامه یا داده‌های آن، نرم‌افزار را ببند."); color: #ffbe8d; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
-        Button { text: root.english ? "Close software" : "بستن نرم‌افزار"; enabled: !root.busy; clicked => { root.close-app(); } }
+      path-edit := LineEdit { min-width: 0px; horizontal-alignment: left; text <=> root.install-path; enabled: root.can-edit-install-path;
+       key-pressed(event) => {
+        if self.enabled && !self.read-only && root.can-edit-install-path && event.modifiers.control {
+         if event.text == "v" || event.text == "V" || event.text == "ر" {
+          // Consume recognized modified aliases so native fallback cannot paste a second time or ignore Alt/Meta.
+          if !event.modifiers.shift && !event.modifiers.alt && !event.modifiers.meta { self.paste(); }
+          return accept;
+         }
+         if event.text == "a" || event.text == "A" || event.text == "ش" {
+          if !event.modifiers.shift && !event.modifiers.alt && !event.modifiers.meta { self.select-all(); }
+          return accept;
+         }
+        }
+        return reject;
        }
       }
+      FlexboxLayout { alignment: stretch; height: 42px; spacing: 10px; flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap;
+       browse-path := Button {
+        layout-order: root.english ? 0 : 2;
+        text: root.english ? "Browse…" : "انتخاب پوشه…";
+        enabled: root.can-edit-install-path;
+        clicked => { if root.can-edit-install-path { root.browse(); } }
+       }
+       paste-path := Button { layout-order: 1; text: root.english ? "Paste path" : "چسباندن مسیر"; enabled: path-edit.enabled && !path-edit.read-only;
+        clicked => { if path-edit.enabled && !path-edit.read-only && root.can-edit-install-path { path-edit.focus(); path-edit.select-all(); path-edit.paste(); } }
+       }
+       Rectangle { layout-order: root.english ? 2 : 0; horizontal-stretch: 1; max-width: 10000px; background: transparent; }
+      }
+      if !root.uninstall: BilingualCheckBox { english: root.english; text: root.english ? "Create desktop shortcut" : "ساخت میان‌بر روی دسکتاپ"; checked <=> root.desktop-shortcut; }
+      if !root.uninstall: BilingualCheckBox { english: root.english; text: root.english ? "Start with Windows" : "اجرا هنگام روشن شدن ویندوز"; checked <=> root.startup; }
       Text { text: root.english ? (root.uninstall ? "Only installed application files and owned shortcuts are removed. Close the app with Exit app before continuing." : "Installation is for your current Windows account. The Start menu shortcut and Uninstall.exe are included. Audio drivers are installed separately from Components inside the app.") : (root.uninstall ? "فقط فایل‌های نصب‌شده و میان‌برهای همین نصب حذف می‌شوند. پیش از ادامه، برنامه را با خروج از برنامه ببند." : "نصب برای حساب فعلی ویندوز است. میان‌بر منوی شروع و Uninstall.exe نیز ساخته می‌شوند. درایور صوتی از تب افزونه‌های خود برنامه نصب می‌شود."); color: #a5b7ce; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
      }
-     if root.step == 1 && root.uninstall: ScrollView {
-      vertical-stretch: 1;
-      review-content := VerticalLayout { width: parent.visible-width - 14px; spacing: 14px; padding-right: 6px; alignment: start;
+     }
+     review-section := Rectangle { visible: root.step == 1 && root.uninstall; height: self.visible ? review-content.preferred-height : 0px; background: transparent;
+      review-content := VerticalLayout { width: parent.width; height: self.preferred-height; padding-top: close-warning.visible ? 16px : 0px; spacing: 12px; alignment: start;
        Text { text: root.english ? "Ready to remove" : "آماده حذف برنامه"; color: #f3fcff; font-size: 22px; font-weight: 700; horizontal-alignment: root.english ? left : right; }
        Text { text: root.english ? "Location" : "مسیر"; color: #a6bed1; horizontal-alignment: root.english ? left : right; }
-       LineEdit { text <=> root.install-path; enabled: false; }
-       BilingualCheckBox { english: root.english; text: root.english ? "Also delete settings and logs" : "تنظیمات و لاگ‌ها هم حذف شوند"; checked <=> root.delete-data; }
+       LineEdit { min-width: 0px; horizontal-alignment: left; text <=> root.install-path; enabled: false; }
+       delete-data-row := BilingualCheckBox { english: root.english; text: root.english ? "Also delete settings and logs" : "تنظیمات و لاگ‌ها هم حذف شوند"; checked <=> root.delete-data; }
        if root.cable-presence == 1 || root.remove-cable: BilingualCheckBox { english: root.english; text: root.english ? "Remove virtual cable (VB-CABLE)" : "حذف کابل مجازی (VB-CABLE)"; checked <=> root.remove-cable; }
        if root.cable-presence == 1: Text { text: root.english ? "VB-CABLE is present and kept by default. Other apps may use it. If selected, Windows asks for administrator approval; choose Remove Driver in the official setup. The app and data stay intact unless removal is verified." : "کابل VB-CABLE شناسایی شد و پیش‌فرض حفظ می‌شود. ممکن است برنامه‌های دیگر از آن استفاده کنند. با انتخاب این گزینه، اجازهٔ مدیر خواسته می‌شود؛ در نصاب رسمی Remove Driver را بزن. برنامه و داده‌ها تا تأیید حذف حفظ می‌شوند."; color: #a5b7ce; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
-       if root.remove-cable: VerticalLayout { spacing: 8px;
+       cable-options := Rectangle { visible: root.remove-cable; height: self.visible ? cable-options-content.preferred-height : 0px; background: transparent;
+        cable-options-content := VerticalLayout { width: parent.width; height: self.preferred-height; spacing: 8px;
         Text { text: root.english ? "Playback output after cable removal" : "خروجی پخش پس از حذف کابل"; color: #a6bed1; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
-        ComboBox { model: root.playback-output-names; current-index <=> root.selected-output-index; enabled: !root.busy && root.playback-outputs.length > 0; selected(value) => { root.selected-output-id = root.playback-outputs[self.current-index].id; } }
+        ComboBox { min-width: 0px; model: root.playback-output-names; current-index <=> root.selected-output-index; enabled: !root.busy && root.playback-outputs.length > 0; selected(value) => { root.selected-output-id = root.playback-outputs[self.current-index].id; } }
         Text { text: root.playback-outputs.length == 0 ? (root.english ? "No verified active physical output is available. Connect or enable a physical playback device, then retry." : "خروجی فیزیکی فعال و تأییدشده‌ای در دسترس نیست. دستگاه پخش فیزیکی را وصل یا فعال کن و دوباره تلاش کن.") : (root.english ? "When you click Uninstall with cable removal selected, Windows audio moves to this device before official setup opens. Volume and mute are preserved." : "با زدن «حذف برنامه»، صدای ویندوز ابتدا به این دستگاه منتقل می‌شود و سپس نصاب رسمی باز می‌شود. بلندی صدا و وضعیت بی‌صدا بودن حفظ می‌شوند."); color: #a5b7ce; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
+       }
        }
        if root.cable-presence != 1: Text { text: root.cable-presence == 0 ? (root.english ? "Checking VB-CABLE presence…" : "در حال بررسی وجود VB-CABLE…") : root.cable-presence == 2 ? (root.english ? "VB-CABLE was not detected in Windows render endpoints." : "کابل VB-CABLE در خروجی‌های صوتی ویندوز شناسایی نشد.") : (root.english ? "VB-CABLE presence could not be determined. The cable will be kept; you can still remove MAXI SOUNDSET." : "وجود VB-CABLE مشخص نشد. کابل حفظ می‌شود؛ همچنان می‌توانی MAXI SOUNDSET را حذف کنی."); color: #a5b7ce; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
        Text { text: root.cable-provenance == 0 ? (root.english ? "Checking installation history…" : "در حال بررسی سابقهٔ نصب…") : root.cable-provenance == 1 ? (root.english ? "Install history: already existed before this app's install attempt." : "سابقهٔ نصب: پیش از تلاش نصب این برنامه وجود داشته است.") : root.cable-provenance == 2 ? (root.english ? "Install via this app was observed. Other apps may also use the cable." : "نصب از طریق این برنامه مشاهده شده است. ممکن است برنامه‌های دیگر هم از کابل استفاده کنند.") : (root.english ? "Installation history is unknown." : "سابقهٔ نصب مشخص نیست."); color: #a5b7ce; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
@@ -189,43 +267,56 @@ export component InstallerWindow inherits Window {
        Text { text: root.default-route-state == 0 ? (root.english ? "Checking Windows playback outputs…" : "در حال بررسی خروجی‌های پخش ویندوز…") : root.default-route-state == 1 ? (root.english ? "Windows playback outputs are verified." : "خروجی‌های پخش ویندوز تأیید شدند.") : root.default-route-state == 2 ? (root.english ? "Windows currently uses VB-CABLE. Selecting cable removal switches it to your chosen physical output when you click Uninstall." : "ویندوز اکنون از VB-CABLE استفاده می‌کند. با انتخاب حذف کابل و زدن حذف برنامه، خروجی به دستگاه فیزیکی انتخاب‌شده تغییر می‌کند.") : (root.english ? "Windows playback outputs could not be verified." : "خروجی‌های پخش ویندوز قابل تأیید نبودند."); color: #a5b7ce; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
        Text { text: root.recovery-state == 0 ? (root.english ? "Checking audio recovery…" : "در حال بررسی بازیابی صدا…") : root.recovery-state == 1 ? (root.english ? "No pending audio recovery was found." : "بازیابی صدای معلقی یافت نشد.") : root.recovery-state == 2 ? (root.english ? "Restore audio with Stop / Exit app before removal." : "پیش از حذف، صدا را با توقف / خروج از برنامه بازگردان.") : (root.english ? "Recovery status could not be verified. Open the app to check." : "وضعیت بازیابی قابل تأیید نبود. برای بررسی، برنامه را باز کن."); color: #a5b7ce; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
        Text { text: root.english ? "Read-only snapshot. Cable removal rechecks audio and Windows outputs before and after official setup." : "این فقط وضعیت فعلی است. پیش و پس از نصاب رسمی، صدا و خروجی‌های ویندوز دوباره بررسی می‌شوند."; color: #91a9c1; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
-       if root.app-running: Rectangle { min-height: 114px; border-radius: 18px; background: #22243a; border-width: 1px; border-color: #ffb07480;
-        VerticalLayout { padding: 15px; spacing: 10px;
-         Text { text: root.closing-app ? (root.english ? "Waiting for safe shutdown and audio restoration…" : "در انتظار خروج امن و بازگردانی وضعیت صدا…") : (root.english ? "MAXI SOUNDSET is running. Close it before removing the application or its data." : "نرم‌افزار MAXI SOUNDSET باز است. پیش از حذف برنامه یا داده‌های آن، نرم‌افزار را ببند."); color: #ffbe8d; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
-         Button { text: root.english ? "Close software" : "بستن نرم‌افزار"; enabled: !root.busy; clicked => { root.close-app(); } }
-        }
-       }
        Text { text: root.english ? "Only installed application files and owned shortcuts are removed. Close the app with Exit app before continuing." : "فقط فایل‌های نصب‌شده و میان‌برهای همین نصب حذف می‌شوند. پیش از ادامه، برنامه را با خروج از برنامه ببند."; color: #a5b7ce; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
 
-      }
      }
-     if root.step == 3: VerticalLayout { alignment: center; spacing: 24px;
-      Text { text: root.english ? (root.uninstall ? (root.cable-outcome == 15 || root.cable-outcome == 14 || root.cable-outcome == 2 ? "Official VB-CABLE removal" : "Removing application…") : "Installing application…") : (root.uninstall ? (root.cable-outcome == 15 || root.cable-outcome == 14 || root.cable-outcome == 2 ? "حذف رسمی VB-CABLE" : "در حال حذف برنامه…") : "در حال نصب برنامه…"); color: #f3fcff; font-size: 24px; font-weight: 700; horizontal-alignment: center; }
+     }
+     progress-section := Rectangle { visible: root.step == 3; height: self.visible ? progress-content.preferred-height : 0px; background: transparent;
+      progress-content := VerticalLayout { width: parent.width; height: self.preferred-height; alignment: center; spacing: 24px;
+      Text { text: root.english ? (root.uninstall ? (root.cable-outcome == 15 || root.cable-outcome == 14 || root.cable-outcome == 2 ? "Official VB-CABLE removal" : "Removing application…") : "Installing application…") : (root.uninstall ? (root.cable-outcome == 15 || root.cable-outcome == 14 || root.cable-outcome == 2 ? "حذف رسمی VB-CABLE" : "در حال حذف برنامه…") : "در حال نصب برنامه…"); color: #f3fcff; font-size: 22px; font-weight: 700; horizontal-alignment: center; }
       ProgressIndicator { progress: root.progress; }
       Text { text: root.message; color: #a5cbd8; wrap: word-wrap; horizontal-alignment: center; }
      }
-     if root.step == 4: VerticalLayout { alignment: center; spacing: 22px;
+     }
+     finish-section := Rectangle { visible: root.step == 4; height: self.visible ? finish-content.preferred-height : 0px; background: transparent;
+      finish-content := VerticalLayout { width: parent.width; height: self.preferred-height; alignment: center; spacing: 22px;
       Text { text: "✓"; color: #69d4e8; font-size: 62px; horizontal-alignment: center; }
-      Text { text: root.english ? (root.uninstall ? "Application removed" : "Installation complete") : (root.uninstall ? "برنامه حذف شد" : "نصب کامل شد"); color: #f3fcff; font-size: 26px; font-weight: 700; horizontal-alignment: center; }
+      Text { text: root.english ? (root.uninstall ? "Application removed" : "Installation complete") : (root.uninstall ? "برنامه حذف شد" : "نصب کامل شد"); color: #f3fcff; font-size: 22px; font-weight: 700; horizontal-alignment: center; }
       Text { text: root.install-path; color: #a5b7ce; wrap: word-wrap; horizontal-alignment: center; }
       if !root.uninstall: BilingualCheckBox { english: root.english; text: root.english ? "Launch MAXI SOUNDSET" : "اجرای MAXI SOUNDSET"; checked <=> root.launch-app; }
       if root.uninstall: Text { text: root.delete-data ? (root.english ? "Settings and logs were removed." : "تنظیمات و لاگ‌ها حذف شدند.") : (root.english ? "Your settings and logs have been kept." : "تنظیمات و لاگ‌های تو حفظ شدند."); color: #a5b7ce; wrap: word-wrap; horizontal-alignment: center; }
      }
+     }
+     status-content := VerticalLayout { spacing: 12px;
      if root.uninstall && root.cable-result != "": Text { text: root.cable-result; color: #a5cbd8; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
      if root.uninstall && root.cable-restart-recommended && root.cable-outcome != 4 && root.cable-outcome != 5: Text { text: root.english ? "VB-CABLE setup ran earlier. Restart Windows as recommended by VB-Audio." : "نصاب VB-CABLE قبلاً اجرا شد. طبق توصیهٔ VB-Audio ویندوز را بازراه‌اندازی کن."; color: #ffbe8d; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
-     if root.error != "": Text { text: root.error; color: #ffb5ba; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
-    }
+     error-tail := Text { visible: root.error != ""; width: parent.width; height: self.visible ? self.preferred-height : 0px; text: root.error; color: #ffb5ba; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
+
+     }
+       }
+      }
+      if root.step == 1 && !root.uninstall && root.error != "": ScrollView { height: 72px;
+       Text { x: 0px; width: parent.visible-width - root.scroll-gutter; text: root.error; color: #ffb5ba; wrap: word-wrap; horizontal-alignment: root.english ? left : right; }
+      }
+     }
     }
    }
   }
-  Rectangle { height: 3px; border-radius: 2px; background: #283c58;
-   Rectangle { width: parent.width * (root.step == 3 ? root.progress : (root.step + 1)/5); height: parent.height; background: #69d4e8; animate width { duration: 220ms; easing: ease-out; } }
-  }
-  HorizontalLayout { spacing: 12px; height: 44px;
-   Text { horizontal-stretch: 1; text: root.version-label; color: #96b0c8; vertical-alignment: center; horizontal-alignment: root.english ? left : right; }
-   Button { text: root.english ? "Cancel" : "لغو"; danger: true; enabled: !root.busy; visible: root.step != 4; clicked => { root.cancel(); } }
-   Button { text: root.english ? "Back" : "قبلی"; enabled: !root.busy && root.step > 0 && root.step < 3; visible: root.step != 4; clicked => { root.back(); } }
-   Button { text: root.step == 4 ? (root.english ? "Finish" : "پایان") : root.step == 2 || (root.step == 1 && root.uninstall) ? (root.english ? (root.uninstall ? "Uninstall" : "Install") : (root.uninstall ? "حذف برنامه" : "نصب")) : (root.english ? "Next" : "بعدی"); enabled: !root.busy && !(root.uninstall && root.step == 1 && (root.app-running || (root.remove-cable && root.selected-output-id == ""))) && (root.uninstall || root.step != 1 || root.accepted); clicked => { root.next(); } }
+  footer := Rectangle { height: 42px; background: transparent;
+   FlexboxLayout { alignment: stretch; width: parent.width; height: parent.height; spacing: 10px; flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap;
+    Rectangle { layout-order: root.english ? 0 : 3; horizontal-stretch: 1; min-width: 0px; max-width: 10000px; background: transparent;
+     Text { width: parent.width; height: parent.height; text: root.version-label; color: #a4b6d2; font-size: 13px; vertical-alignment: center; horizontal-alignment: root.english ? left : right; overflow: elide; }
+    }
+    cancel-action := Button { layout-order: root.english ? 1 : 2; text: root.english ? "Cancel" : "لغو"; enabled: !root.busy; visible: root.step != 4; clicked => { root.cancel(); } }
+    back-action := Button { layout-order: root.english ? 2 : 1; text: root.english ? "Back" : "قبلی"; enabled: !root.busy && root.step > 0 && root.step < 3; visible: root.step != 4; clicked => { root.back(); } }
+    primary-action := Button { layout-order: root.english ? 3 : 0; primary: true; danger: root.uninstall && root.step == 1; text: root.step == 4 ? (root.english ? "Finish" : "پایان") : root.step == 2 || (root.step == 1 && root.uninstall) ? (root.english ? (root.uninstall ? "Uninstall" : "Install") : (root.uninstall ? "حذف برنامه" : "نصب")) : (root.english ? "Next" : "بعدی");
+     enabled: !root.busy
+         && !(!root.uninstall && root.step == 2 && root.waiting-for-app)
+         && !(root.uninstall && root.step == 1 && (root.app-running || (root.remove-cable && root.selected-output-id == "")))
+         && (root.uninstall || root.step != 1 || root.accepted);
+     clicked => { root.next(); }
+    }
+   }
   }
  }
 }

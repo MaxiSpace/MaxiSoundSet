@@ -452,6 +452,9 @@ pub fn native_inventory(check_hardware: bool) -> Result<Inventory> {
 pub fn native_active_inventory() -> Result<Inventory> {
     native_inventory_for(false, windows::Win32::Media::Audio::DEVICE_STATE_ACTIVE)
 }
+pub fn native_active_hardware_inventory() -> Result<Inventory> {
+    native_inventory_for(true, windows::Win32::Media::Audio::DEVICE_STATE_ACTIVE)
+}
 fn native_inventory_for(check_hardware: bool, states: windows::Win32::Media::Audio::DEVICE_STATE) -> Result<Inventory> {
     use windows::{
         core::PCWSTR,

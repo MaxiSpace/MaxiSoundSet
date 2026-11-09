@@ -17,6 +17,10 @@ use std::{
     fs,
     path::{Path, PathBuf},
     rc::Rc,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 slint::include_modules!();
@@ -112,6 +116,18 @@ fn version_label(english: bool) -> String {
     let _ = english;
     format!("v{}", operations::VERSION)
 }
+fn is_operation_page(uninstall: bool, step: i32) -> bool {
+    step == if uninstall { 1 } else { 2 }
+}
+
+fn target_running(uninstall: bool, root: &Path) -> Result<bool> {
+    if uninstall {
+        running_app::is_running(root)
+    } else {
+        operations::install_target_running(root)
+    }
+}
+
 fn bootstrap() -> Result<Option<PathBuf>> {
     let args = std::env::args_os().collect::<Vec<_>>();
     if args.get(1).is_some_and(|s| s == "--uninstall-root") {
@@ -205,6 +221,15 @@ fn run() -> Result<()> {
     }
     ui.set_install_path(path.display().to_string().into());
     if ui.get_uninstall() && !smoke { refresh_uninstall_review(&ui); }
+    let probe_generation = Arc::new(AtomicU64::new(0));
+    let generation = probe_generation.clone();
+    let w = ui.as_weak();
+    ui.on_install_path_changed(move || {
+        generation.fetch_add(1, Ordering::Relaxed);
+        if let Some(u) = w.upgrade() {
+            u.set_app_running(false);
+        }
+    });
     let w = ui.as_weak();
     ui.on_language_changed(move || {
         if let Some(u) = w.upgrade() {
@@ -219,6 +244,9 @@ fn run() -> Result<()> {
     let w = ui.as_weak();
     ui.on_browse(move || {
         if let Some(u) = w.upgrade() {
+            if u.get_busy() || u.get_uninstall() || u.get_step() != 2 {
+                return;
+            }
             match platform::browse() {
                 Ok(Some(p)) => u.set_install_path(p.display().to_string().into()),
                 Ok(None) => (),
@@ -226,9 +254,15 @@ fn run() -> Result<()> {
             }
         }
     });
+    let generation = probe_generation.clone();
     let w = ui.as_weak();
     ui.on_back(move || {
         if let Some(u) = w.upgrade() {
+            if u.get_busy() {
+                return;
+            }
+            generation.fetch_add(1, Ordering::Relaxed);
+            u.set_app_running(false);
             u.set_error("".into());
             u.set_step((u.get_step() - 1).max(0));
         }
@@ -236,23 +270,34 @@ fn run() -> Result<()> {
     ui.on_cancel(|| {
         let _ = slint::quit_event_loop();
     });
+    let generation = probe_generation.clone();
     let w = ui.as_weak();
     ui.on_close_app(move || {
         let Some(u) = w.upgrade() else { return };
-        if u.get_busy() || !u.get_uninstall() { return; }
+        let uninstall = u.get_uninstall();
+        if u.get_busy() || !u.get_app_running() || !is_operation_page(uninstall, u.get_step()) {
+            return;
+        }
         let root = PathBuf::from(u.get_install_path().as_str());
+        generation.fetch_add(1, Ordering::Relaxed);
         u.set_busy(true);
         u.set_closing_app(true);
         u.set_error("".into());
         let weak = u.as_weak();
         std::thread::spawn(move || {
-            let result = running_app::close(&root);
-            let running = running_app::is_running(&root).unwrap_or(true);
+            let result = if uninstall {
+                running_app::close(&root)
+            } else {
+                operations::install_target_running(&root).and_then(|running| {
+                    if running { running_app::close(&root) } else { Ok(()) }
+                })
+            };
+            let running = target_running(uninstall, &root).unwrap_or(uninstall);
             let _ = weak.upgrade_in_event_loop(move |u| {
                 u.set_busy(false);
                 u.set_closing_app(false);
                 u.set_app_running(running);
-                refresh_uninstall_review(&u);
+                if uninstall { refresh_uninstall_review(&u); }
                 if let Err(e) = result {
                     u.set_error(format!("{}: {e:#}", if u.get_english() { "Safe shutdown did not finish. Use Exit app and retry" } else { "خروج امن کامل نشد. از گزینهٔ خروج از برنامه استفاده کن و دوباره تلاش کن" }).into());
                 }
@@ -267,9 +312,14 @@ fn run() -> Result<()> {
             slint::CloseRequestResponse::HideWindow
         }
     });
+    let generation = probe_generation.clone();
     let w = ui.as_weak();
     ui.on_next(move || {
         let Some(u) = w.upgrade() else { return };
+        if u.get_busy() || (u.get_app_running() && is_operation_page(u.get_uninstall(), u.get_step())) {
+            return;
+        }
+        generation.fetch_add(1, Ordering::Relaxed);
         u.set_error("".into());
         match u.get_step() {
             0 => u.set_step(1),
@@ -355,6 +405,10 @@ fn run() -> Result<()> {
                             }
                             Err(e) => {
                                 u.set_step(if uninstall { 1 } else { 2 });
+                                if e.is::<operations::InstallAppRunning>() {
+                                    u.set_app_running(true);
+                                    return;
+                                }
                                 u.set_error(
                                     format!(
                                         "{}: {e:#}",
@@ -377,33 +431,50 @@ fn run() -> Result<()> {
     });
     let timer = slint::Timer::default();
     let running_timer = slint::Timer::default();
-    if ui.get_uninstall() && !smoke {
+    if !smoke {
         let weak = ui.as_weak();
-        let pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pending = Arc::new(AtomicBool::new(false));
+        let generation = probe_generation;
         running_timer.start(
             slint::TimerMode::Repeated,
             Duration::from_millis(500),
             move || {
                 let Some(u) = weak.upgrade() else { return };
+                let uninstall = u.get_uninstall();
                 if u.get_busy()
-                    || u.get_step() >= 3
-                    || pending.swap(true, std::sync::atomic::Ordering::Relaxed)
+                    || !is_operation_page(uninstall, u.get_step())
+                    || pending.swap(true, Ordering::Relaxed)
                 {
                     return;
                 }
-                let root = PathBuf::from(u.get_install_path().as_str());
+                let path = u.get_install_path();
+                let revision = generation.load(Ordering::Relaxed);
                 let weak = u.as_weak();
                 let pending = pending.clone();
+                let generation = generation.clone();
                 std::thread::spawn(move || {
-                    let result = running_app::is_running(&root);
-                    let _ = weak.upgrade_in_event_loop(move |u| match result {
-                        Ok(running) => u.set_app_running(running),
-                        Err(e) => {
-                            u.set_app_running(true);
-                            u.set_error(format!("{e:#}").into());
+                    let result = target_running(uninstall, Path::new(path.as_str()));
+                    let _ = weak.upgrade_in_event_loop(move |u| {
+                        pending.store(false, Ordering::Relaxed);
+                        if u.get_busy()
+                            || u.get_uninstall() != uninstall
+                            || !is_operation_page(uninstall, u.get_step())
+                            || u.get_install_path() != path
+                            || generation.load(Ordering::Relaxed) != revision
+                        {
+                            return;
+                        }
+                        match result {
+                            Ok(running) => u.set_app_running(running),
+                            Err(e) if uninstall => {
+                                u.set_app_running(true);
+                                if u.get_error().is_empty() {
+                                    u.set_error(format!("{e:#}").into());
+                                }
+                            }
+                            Err(_) => u.set_app_running(false),
                         }
                     });
-                    pending.store(false, std::sync::atomic::Ordering::Relaxed);
                 });
             },
         );

@@ -1,4 +1,4 @@
-# MAXI SOUNDSET 1.0.3
+# MAXI SOUNDSET 1.0.4
 
 MAXI SOUNDSET is a Windows audio loudness and enhancement app built with Rust and Slint. It includes a Persian right-to-left interface and an English left-to-right interface.
 
@@ -12,12 +12,13 @@ MAXI SOUNDSET is a Windows audio loudness and enhancement app built with Rust an
 - The optional VB-CABLE removal flow moves Windows audio roles to the selected physical output and includes checks to protect volume and mute state.
 - The About page offers a user-controlled app update check. Download and installation require an explicit user action. Updates install to the existing app path and support rollback for handled failures.
 - The optional Release Notes button opens notes for the selected version.
+- Scroll over the tray icon to adjust volume, or use its menu to open the dashboard and control playback. Use Refresh on the Sound page after reconnecting an audio device.
 - Settings and logs are stored in the app's `Data` folder. Uninstall keeps them by default and offers a separate choice to remove app data.
 - The app and installer use static C runtime linking and do not require a separate Microsoft Visual C++ runtime installation.
 
 ## Install and run
 
-Run `MAXI-SOUNDSET-v1.0.3-Setup.exe`, choose an installation folder, and launch the app from its shortcut. In Windows volume mode, choose a target from 0 to 100. For Full mode, install VB-CABLE from the Components page, then select the virtual cable as input and a physical playback device as output. Use a physical output distinct from the virtual cable.
+Run `MAXI-SOUNDSET-v1.0.4-Setup.exe`, choose a language and installation folder, and launch the app from its shortcut. In Windows volume mode, choose a target from 0 to 100. For Full mode, install VB-CABLE from the Components page, then select the virtual cable as input and a physical playback device as output. Use a physical output distinct from the virtual cable.
 
 Choose a sound profile from the Sound page: Gentle, Voice / dialogue, Music, Cinema, Warm & relaxed, or Gaming focus. The EQ page also offers manual adjustment. Sound profiles and treble smoothing require Full mode with VB-CABLE. Loudness leveling, sound enhancement, and treble smoothing remain separate controls; the Windows volume mode does not apply sound enhancement or treble smoothing.
 

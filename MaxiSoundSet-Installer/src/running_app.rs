@@ -1,6 +1,10 @@
 //! Scope shutdown requests to the executable owned by this installation.
 use anyhow::{ensure, Context, Result};
 use std::{
+    ffi::OsString,
+    fs,
+    io::ErrorKind,
+    os::windows::ffi::OsStringExt,
     path::Path,
     time::{Duration, Instant},
 };
@@ -34,13 +38,23 @@ fn matches(handle: HANDLE, executable: &Path) -> Result<bool> {
             &mut len,
         )?;
     }
-    Ok(crate::platform::same(
-        Path::new(&String::from_utf16_lossy(&name[..len as usize])),
-        executable,
-    ))
+    let image = OsString::from_wide(&name[..len as usize]);
+    // Compare normalized paths without folding case: Windows directories can
+    // contain two distinct filenames that differ only by case.
+    match fs::canonicalize(image) {
+        Ok(path) => Ok(path.as_os_str() == executable.as_os_str()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 fn processes(root: &Path) -> Result<Vec<Process>> {
     let executable = root.join("MaxiSoundSet.exe");
+    crate::operations::no_links(&executable)?;
+    let executable = match fs::canonicalize(executable) {
+        Ok(path) => path,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).context("Cannot verify the installed executable"),
+    };
     let snapshot = Process(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)? });
     let mut entry = PROCESSENTRY32W {
         dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,

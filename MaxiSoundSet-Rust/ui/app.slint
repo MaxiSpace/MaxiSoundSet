@@ -25,6 +25,11 @@ global Colors {
     out property <color> accent: #74aaf1;
     out property <color> text: #eff5ff;
     out property <color> muted: #a4b6d2;
+    out property <brush> overlay: @linear-gradient(180deg, #1a2942fa 0%, #142039fa 45%, #0d162bfa 100%);
+    out property <color> overlay-border: #344b69;
+    out property <color> overlay-hover: #233853;
+    out property <color> overlay-selected: #1b2c46;
+    out property <color> overlay-pressed: #182a43;
 }
 
 component Action inherits Rectangle {
@@ -33,22 +38,26 @@ component Action inherits Rectangle {
     in property <bool> primary: false;
     in property <bool> selected: false;
     in property <bool> enabled: true;
+    in property <length> corner-radius: 14px;
+    in property <bool> icon-only: false;
+    in property <length> glyph-size: 12px;
+    in property <color> glyph-color: root.icon-only ? Colors.accent : Colors.text;
     callback clicked();
     min-height: 36px;
     max-height: 36px;
     preferred-height: 36px;
     vertical-stretch: 0;
-    border-radius: 14px;
-    border-width: 1px;
+    border-radius: root.corner-radius;
+    border-width: root.icon-only ? 0px : 1px;
     border-color: root.selected ? Colors.accent : Colors.border;
     background: transparent;
     property <float> visual-scale: !root.enabled ? 1 : touch.pressed ? 0.98 : touch.has-hover ? 1.02 : 1;
     animate visual-scale { duration: 150ms; easing: cubic-bezier(0.16,1,0.3,1); }
     Rectangle { x: (root.width - self.width)/2; y: (root.height - self.height)/2; width: root.width * root.visual-scale; height: root.height * root.visual-scale;
-        border-radius: 14px; background: !root.enabled ? #0c162b : touch.pressed ? #06132d : touch.has-hover ? #0b2b58 : #00193f;
-        drop-shadow-color: touch.has-hover && root.enabled ? #58b3f238 : #58b3f200; drop-shadow-blur: 16px;
+        border-radius: root.icon-only ? min(self.width, self.height) / 2 : root.corner-radius; background: !root.enabled ? #0c162b : root.icon-only ? (touch.pressed ? #74aaf13b : touch.has-hover ? #74aaf129 : #74aaf114) : touch.pressed ? #06132d : touch.has-hover ? #0b2b58 : #00193f;
+        drop-shadow-color: !root.icon-only && touch.has-hover && root.enabled ? #58b3f238 : #58b3f200; drop-shadow-blur: 16px;
         animate background, drop-shadow-color { duration: 150ms; easing: ease-out; }
-        Rectangle { border-radius: 14px; background: transparent; border-width: root.selected || touch.pressed ? 1px : 0px; border-color: #81dfff60; drop-shadow-color: touch.has-hover && root.enabled ? #6fceff36 : transparent; drop-shadow-blur: 4px; animate drop-shadow-color { duration: 150ms; } }
+        Rectangle { border-radius: root.icon-only ? min(self.width, self.height) / 2 : root.corner-radius; background: transparent; border-width: !root.icon-only && (root.selected || touch.pressed) ? 1px : 0px; border-color: #81dfff60; drop-shadow-color: !root.icon-only && touch.has-hover && root.enabled ? #6fceff36 : transparent; drop-shadow-blur: 4px; animate drop-shadow-color { duration: 150ms; } }
     }
     animate border-color { duration: 180ms; easing: ease-out; }
     accessible-role: button;
@@ -57,10 +66,10 @@ component Action inherits Rectangle {
     accessible-action-default => { if root.enabled { root.clicked(); } }
     forward-focus: focus;
     out property <bool> has-keyboard-focus: focus.has-focus;
-    Text { width: parent.width; height: parent.height; y: touch.pressed ? 1px : 0px; animate y { duration: 100ms; easing: ease-out; } text: root.text; color: root.enabled ? Colors.text : #6a7c99; font-size: 12px; font-weight: root.primary ? 700 : 500; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
+    Text { width: parent.width; height: parent.height; y: touch.pressed ? 1px : 0px; animate y { duration: 100ms; easing: ease-out; } text: root.text; color: root.enabled ? root.glyph-color : #6a7c99; font-size: root.glyph-size; font-weight: root.primary ? 700 : 500; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
     focus := FocusScope { enabled: root.enabled; focus-changed-event => { if self.has-focus && root.reveal-on-focus { Viewport.reveal(root.absolute-position.x, root.absolute-position.y, root.height); } } key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.clicked(); return accept; } return reject; } }
     touch := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { focus.focus(); root.clicked(); } }
-    if focus.has-focus: Rectangle { border-radius: 14px; border-width: 1px; border-color: Colors.accent; background: transparent; }
+    if focus.has-focus: Rectangle { border-radius: root.corner-radius; border-width: 1px; border-color: Colors.accent; background: transparent; }
 }
 
 
@@ -120,6 +129,31 @@ component HelpButton inherits Rectangle {
     in property <string> title;
     in property <string> message;
     in property <string> label;
+    // Structured VB-CABLE copy is opt-in; other help bodies keep their text layout.
+    in property <bool> cable-input-body: false;
+    in property <bool> context-active: true;
+    in property <int> close-request: 0;
+    changed context-active => { if !root.context-active { root.close-help(); } }
+    changed close-request => { root.close-help(); }
+    in property <bool> expanded-help: false;
+    in property <length> help-width: 300px;
+    in property <length> help-height: 126px;
+    property <length> panel-width: root.expanded-help ? min(root.help-width, Viewport.width - 16px) : 300px;
+    property <length> panel-height: root.expanded-help ? min(root.help-height, Viewport.height - 16px) : 126px;
+    property <length> panel-x: clamp(Locale.rtl ? 0px : root.width - root.panel-width, 8px - root.absolute-position.x, Viewport.width - root.panel-width - 8px - root.absolute-position.x);
+    property <length> panel-y: root.expanded-help ? clamp(root.absolute-position.y + root.height + 7px + root.panel-height <= Viewport.height - 8px ? root.height + 7px : -root.panel-height - 7px, 8px - root.absolute-position.y, Viewport.height - root.panel-height - 8px - root.absolute-position.y) : clamp(-133px, 8px - root.absolute-position.y, Viewport.height - 134px - root.absolute-position.y);
+    out property <bool> help-open: popup.is-open;
+    out property <bool> trigger-focused: focus.has-focus;
+    out property <ControlBounds> trigger-bounds: { x: root.absolute-position.x, y: root.absolute-position.y, width: root.width, height: root.height };
+    property <bool> close-has-focus: false;
+    out property <bool> close-focused: root.help-open && root.close-has-focus;
+    // Popup children publish measurements; enclosing code never reaches into
+    // the popup's separate component scope.
+    out property <length> scroll-range: 0px;
+    out property <length> scroll-offset: 0px;
+    property <length> scroll-viewport-height: 0px;
+    out property <ControlBounds> panel-bounds: { x: root.absolute-position.x + root.panel-x, y: root.absolute-position.y + root.panel-y, width: root.panel-width, height: root.panel-height };
+    out property <ControlBounds> close-bounds: { x: root.panel-bounds.x + 13px + (Locale.rtl ? 0px : root.panel-width - 48px), y: root.panel-bounds.y + 13px, width: 22px, height: 22px };
     width: 18px; height: 18px;
     border-radius: 9px; border-width: 1px; border-color: touch.has-hover || focus.has-focus ? Colors.accent : #4b6689;
     background: touch.pressed ? #06132d : touch.has-hover ? #0b2b58 : #00193f;
@@ -127,39 +161,118 @@ component HelpButton inherits Rectangle {
     accessible-role: button; accessible-label: root.label;
     accessible-action-default => { root.open-help(); }
     forward-focus: focus;
-    public function open-help() { popup.show(); }
+    public function open-help() { root.scroll-offset = 0px; popup.show(); }
     public function close-help() { popup.close(); }
+    public function scroll-help(fraction: float) { if root.expanded-help { root.scroll-offset = -clamp(fraction, 0, 1) * root.scroll-range; } }
+    function dismiss-help() { popup.close(); focus.focus(); }
     Text { width: parent.width; height: parent.height; text: "?"; color: #bfefff; font-size: 11px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
     focus := FocusScope { focus-changed-event => { if self.has-focus && root.reveal-on-focus { Viewport.reveal(root.absolute-position.x, root.absolute-position.y, root.height); } } key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.open-help(); return accept; } return reject; } }
     touch := TouchArea { mouse-cursor: pointer; clicked => { focus.focus(); root.open-help(); } }
     popup := PopupWindow {
-        x: clamp(Locale.rtl ? 0px : root.width - 300px, 8px - root.absolute-position.x, Viewport.width - 308px - root.absolute-position.x); y: clamp(-133px, 8px - root.absolute-position.y, Viewport.height - 134px - root.absolute-position.y); width: 300px; height: 126px;
+        x: root.panel-x; y: root.panel-y; width: root.panel-width; height: root.panel-height;
         close-policy: close-on-click-outside;
-        forward-focus: popup-focus;
+        // PopupWindow is lowered to a separate component. A static initial
+        // focus target avoids a change handler on its synthetic is-open flag.
+        forward-focus: close-focus;
         popup-focus := FocusScope {
-            key-pressed(event) => { if event.text == Key.Escape || event.text == Key.Return { root.close-help(); return accept; } return reject; }
-            Rectangle { border-radius: 16px; border-width: 1px; border-color: #4d7594; background: #0c1b37; drop-shadow-color: #00000080; drop-shadow-blur: 18px;
+            capture-key-pressed(event) => {
+                if root.expanded-help && (event.text == Key.Tab || event.text == Key.Backtab) { close-focus.focus(); return accept; }
+                if root.expanded-help && event.text == Key.Escape { root.dismiss-help(); return accept; }
+                if root.expanded-help && (event.text == Key.DownArrow || event.text == Key.UpArrow || event.text == Key.PageDown || event.text == Key.PageUp || event.text == Key.Home || event.text == Key.End) {
+                    if event.text == Key.Home { root.scroll-offset = 0px; }
+                    else if event.text == Key.End { root.scroll-offset = -root.scroll-range; }
+                    else { root.scroll-offset = clamp(root.scroll-offset + (event.text == Key.UpArrow || event.text == Key.PageUp ? 1 : -1) * (event.text == Key.PageDown || event.text == Key.PageUp ? root.scroll-viewport-height * 0.8 : 32px), -root.scroll-range, 0px); }
+                    return accept;
+                }
+                return reject;
+            }
+            key-pressed(event) => { if !root.expanded-help && (event.text == Key.Escape || event.text == Key.Return) { root.close-help(); return accept; } return reject; }
+            Rectangle { border-radius: 16px; background: transparent; drop-shadow-color: #0000004d; drop-shadow-blur: 18px; drop-shadow-offset-y: 3px;
+                // Fixed PNGs derived from the adjacent SVG sources avoid the
+                // software renderer's per-slice SVG rasterization rounding bug.
+                Image { width: parent.width; height: parent.height; source: @image-url("../assets/surface-help.png", nine-slice(16)); }
                 VerticalLayout { padding: 13px; spacing: 6px;
-                    Rectangle { height: 22px; background: transparent;
+                    Rectangle { height: 22px; vertical-stretch: 0; background: transparent;
                         Text { x: Locale.rtl ? 28px : 0px; width: parent.width - 28px; height: parent.height; horizontal-alignment: Locale.rtl ? right : left; vertical-alignment: center; text: root.title; color: Colors.text; font-size: 12px; font-weight: 700; }
-                        Rectangle { x: Locale.rtl ? 0px : parent.width - self.width; width: 22px; height: 22px; border-radius: 11px; border-width: 1px; border-color: close-touch.has-hover ? Colors.accent : #456487; background: close-touch.pressed ? #06132d : close-touch.has-hover ? #0b2b58 : #00193f;
-                            Text { width: parent.width; height: parent.height; text: "×"; color: Colors.text; font-size: 15px; horizontal-alignment: center; vertical-alignment: center; }
-                            close-touch := TouchArea { mouse-cursor: pointer; clicked => { root.close-help(); } }
+                        Rectangle { x: Locale.rtl ? 0px : parent.width - self.width; width: 22px; height: 22px; border-radius: 11px; background: close-touch.pressed ? #74aaf13b : close-touch.has-hover ? #74aaf129 : #74aaf114;
+                            Text { width: parent.width; height: parent.height; text: "×"; color: Colors.accent; font-size: 15px; horizontal-alignment: center; vertical-alignment: center; }
+                            accessible-role: button;
+                            accessible-label: Locale.rtl ? "بستن راهنما" : "Close help";
+                            accessible-action-default => { if root.expanded-help { root.dismiss-help(); } else { root.close-help(); } }
+                            forward-focus: close-focus;
+                            close-focus := FocusScope { focus-changed-event => { root.close-has-focus = self.has-focus; } key-pressed(event) => { if root.expanded-help && (event.text == Key.Return || event.text == " ") { root.dismiss-help(); return accept; } return reject; } }
+                            close-touch := TouchArea { mouse-cursor: pointer; clicked => { if root.expanded-help { root.dismiss-help(); } else { root.close-help(); } } }
+                            if root.expanded-help && close-focus.has-focus: Rectangle { border-radius: 11px; border-width: 1px; border-color: Colors.accent; background: transparent; }
                         }
                     }
-                    Text { horizontal-alignment: Locale.rtl ? right : left; text: root.message; color: #c4d4e9; font-size: 11px; wrap: word-wrap; vertical-stretch: 1; }
+                    if !root.expanded-help: Text { horizontal-alignment: Locale.rtl ? right : left; text: root.message; color: Colors.muted; font-size: 11px; wrap: word-wrap; vertical-stretch: 1; }
+                    if root.expanded-help: help-scroll := ScrollView { min-height: 0px; min-width: 0px; vertical-stretch: 1; content-width: self.visible-width;
+                        content-height: root.cable-input-body ? cable-body.height : help-body.preferred-height;
+                        content-y <=> root.scroll-offset;
+                        // Change handlers observe later layout changes; publish
+                        // the first computed measurements when this popup opens.
+                        init => { root.scroll-viewport-height = self.visible-height; root.scroll-range = max(0px, self.content-height - self.visible-height); }
+                        changed visible-height => { root.scroll-viewport-height = self.visible-height; root.scroll-range = max(0px, self.content-height - self.visible-height); }
+                        changed content-height => { root.scroll-range = max(0px, self.content-height - self.visible-height); }
+                        help-body := Text { visible: !root.cable-input-body; width: help-scroll.visible-width - 16px; height: self.preferred-height; horizontal-alignment: Locale.rtl ? right : left; vertical-alignment: top; text: root.message; color: Colors.muted; font-size: 12px; wrap: word-wrap; }
+                        cable-body := Rectangle { visible: root.cable-input-body; width: help-scroll.visible-width - 16px; height: cable-layout.preferred-height;
+                        cable-layout := VerticalLayout { spacing: 8px;
+                            VerticalLayout { spacing: 4px;
+                                Text { text: "CABLE Input"; horizontal-alignment: left; color: Colors.text; font-size: 12px; font-weight: 700; }
+                                Text { text: Locale.rtl ? "برای استفادهٔ معمول." : "For everyday use."; horizontal-alignment: Locale.rtl ? right : left; color: Colors.muted; font-size: 12px; wrap: word-wrap; }
+                            }
+                            VerticalLayout { spacing: 4px;
+                                Text { text: "CABLE In 16ch"; horizontal-alignment: left; color: Colors.text; font-size: 12px; font-weight: 700; }
+                                Text { text: Locale.rtl ? "تا ۱۶ کانال؛ برای کارهای چندکاناله." : "Up to 16 channels, for multichannel workflows."; horizontal-alignment: Locale.rtl ? right : left; color: Colors.muted; font-size: 12px; wrap: word-wrap; }
+                            }
+                            Text { text: Locale.rtl ? "هر دو مناسب استریو و اکولایزرند؛ 16ch نشانهٔ کیفیت بالاتر نیست." : "Both support stereo and EQ; 16ch does not mean higher quality."; horizontal-alignment: Locale.rtl ? right : left; color: Colors.muted; font-size: 12px; wrap: word-wrap; }
+                        }
+                        }
+                    }
                 }
             }
         }
     }
 }
 
+// The conditional Full-mode field publishes measurements through its public
+// interface instead of accessing IDs across Slint's conditional component scope.
+component VirtualInputHeader inherits Rectangle {
+    in property <bool> context-active: true;
+    in property <int> close-request;
+    out property <bool> help-open: help.help-open;
+    out property <bool> trigger-focused: help.trigger-focused;
+    out property <bool> close-focused: help.close-focused;
+    out property <ControlBounds> panel-bounds: help.panel-bounds;
+    out property <ControlBounds> close-bounds: help.close-bounds;
+    out property <ControlBounds> trigger-bounds: help.trigger-bounds;
+    out property <ControlBounds> title-bounds: { x: title.absolute-position.x, y: title.absolute-position.y, width: title.width, height: title.height };
+    out property <length> scroll-range: help.scroll-range;
+    out property <length> scroll-offset: help.scroll-offset;
+    height: title.preferred-height;
+    min-width: title.preferred-width;
+    background: transparent;
+    title := Text { x: Locale.rtl ? parent.width - self.width : 0px; width: self.preferred-width; height: parent.height; horizontal-alignment: Locale.rtl ? right : left; text: Locale.rtl ? "ورودی مجازی" : "VIRTUAL INPUT"; color: Colors.muted; font-size: 10px; }
+    help := HelpButton { x: Locale.rtl ? title.x - self.width - 6px : title.width + 6px; y: (parent.height - self.height) / 2; reveal-on-focus: false; expanded-help: true; cable-input-body: true; help-width: 320px; help-height: 220px;
+        context-active: root.context-active; close-request: root.close-request;
+        title: Locale.rtl ? "ورودی‌های VB-CABLE" : "VB-CABLE inputs";
+        label: Locale.rtl ? "راهنمای ورودی‌های VB-CABLE" : "Help with VB-CABLE inputs";
+    }
+}
+
 component ComboBox inherits Rectangle {
+    out property <ControlBounds> control-bounds: { x: root.absolute-position.x, y: root.absolute-position.y, width: root.width, height: root.height };
     in property <bool> reveal-on-focus: true;
     in property <[string]> model;
     in property <bool> enabled: true;
     in-out property <int> current-index: 0;
     property <string> current-value: root.model[root.current-index];
+    // Presentation only: selection, popup rows and accessibility retain current-value.
+    in property <string> compact-closed-label: "";
+    out property <string> closed-label: root.compact-closed-label != "" && root.width < 240px ? root.compact-closed-label : root.current-value;
+    out property <ControlBounds> closed-text-bounds: {x: closed-text.absolute-position.x, y: closed-text.absolute-position.y, width: closed-text.width, height: closed-text.height};
+    out property <ControlBounds> closed-icon-bounds: {x: closed-icon.absolute-position.x, y: closed-icon.absolute-position.y, width: closed-icon.width, height: closed-icon.height};
+    out property <string> full-value: root.current-value;
     property <bool> expanded: false;
     callback selected(string);
     min-height: 36px; preferred-height: 36px; vertical-stretch: 0;
@@ -181,9 +294,11 @@ component ComboBox inherits Rectangle {
     }
     public function open-menu() { if root.enabled && root.model.length > 0 { popup.show(); } }
     public function close-menu() { popup.close(); root.expanded = false; }
-    FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; padding-left: 12px; padding-right: 12px; spacing: 8px;
-        Text { layout-order: Locale.rtl ? 0 : 0; horizontal-stretch: 1; horizontal-alignment: Locale.rtl ? right : left; text: root.current-value; color: root.enabled ? Colors.text : Colors.muted; overflow: elide; vertical-alignment: center; }
-        Text { layout-order: Locale.rtl ? -1 : 1; text: root.expanded ? "−" : "+"; width: 15px; color: Colors.muted; vertical-alignment: center; horizontal-alignment: center; }
+    // Fixed visual geometry keeps width-dependent presentation out of the
+    // control's intrinsic layout measurement (and reserves the icon in RTL too).
+    Rectangle { x: 0px; y: 0px; width: parent.width; height: parent.height; background: transparent;
+        closed-text := Text { x: Locale.rtl ? 35px : 12px; width: max(0px, root.width - 47px); height: parent.height; horizontal-alignment: Locale.rtl ? right : left; text: root.closed-label; color: root.enabled ? Colors.text : Colors.muted; overflow: elide; vertical-alignment: center; }
+        closed-icon := Text { x: Locale.rtl ? 12px : root.width - 27px; width: 15px; height: parent.height; text: root.expanded ? "−" : "+"; color: Colors.muted; vertical-alignment: center; horizontal-alignment: center; }
     }
     focus := FocusScope { enabled: root.enabled; focus-changed-event => { if self.has-focus && root.reveal-on-focus { Viewport.reveal(root.absolute-position.x, root.absolute-position.y, root.height); } }
         key-pressed(event) => {
@@ -207,7 +322,8 @@ component ComboBox inherits Rectangle {
                 if event.text == Key.DownArrow { root.choose(root.current-index + 1); return accept; }
                 return reject;
             }
-            Rectangle { border-radius: 23px; border-width: 1px; border-color: Colors.border; background: #0c1b37;
+            Rectangle { border-radius: 23px; background: transparent; drop-shadow-color: #0000004d; drop-shadow-blur: 16px; drop-shadow-offset-y: 3px;
+                Image { width: parent.width; height: parent.height; source: @image-url("../assets/surface-dropdown.png", nine-slice(23)); }
                 property <float> reveal: menu-focus.has-focus ? 1 : 0;
                 animate reveal { duration: 200ms; easing: cubic-bezier(0.16,1,0.3,1); }
                 x: (parent.width - self.width)/2; y: 0px;
@@ -217,7 +333,7 @@ component ComboBox inherits Rectangle {
                 ScrollView { content-y: -max(0, root.current-index - 5) * 38px; VerticalLayout { padding: 8px; spacing: 2px; alignment: start;
                     for item[i] in root.model: Rectangle {
                         min-height: 36px; max-height: 36px; vertical-stretch: 0; border-radius: 10px;
-                        background: row-touch.pressed ? #06132d : row-touch.has-hover || i == root.current-index ? #00193f : transparent;
+                        background: row-touch.pressed ? Colors.overlay-pressed : row-touch.has-hover ? Colors.overlay-hover : i == root.current-index ? Colors.overlay-selected : transparent;
                         border-width: i == root.current-index ? 1px : 0px; border-color: Colors.accent;
                         animate background { duration: 140ms; easing: ease-out; }
                         Text { horizontal-alignment: Locale.rtl ? right : left; x: 10px; width: parent.width - 20px; height: parent.height; y: menu-focus.has-focus ? 0px : -6px; opacity: menu-focus.has-focus ? 1 : 0; animate y, opacity { duration: 160ms; delay: min(i, 12) * 18ms; easing: cubic-bezier(0.16,1,0.3,1); } text: item; color: Colors.text; overflow: elide; vertical-alignment: center; }
@@ -395,6 +511,7 @@ component PageSurface inherits Rectangle {
 
 
 component NavAction inherits Rectangle {
+    in property <bool> overlay: false;
     out property <bool> has-keyboard-focus: focus.has-focus;
     in property <bool> reveal-on-focus: true;
     in property <string> text; in property <image> icon;
@@ -406,7 +523,7 @@ component NavAction inherits Rectangle {
     min-height: 38px; max-height: 38px; preferred-height: 38px; vertical-stretch: 0; border-radius: 23px;
     drop-shadow-color: touch.has-hover ? #59bef832 : transparent; drop-shadow-blur: 12px; animate drop-shadow-color { duration: 150ms; } border-width: 1px;
     border-color: root.selected ? #6d98c999 : #38507760;
-    background: touch.pressed ? #06132d : touch.has-hover ? #153354 : root.selected ? #163353 : #00193f;
+    background: root.overlay ? (touch.pressed ? Colors.overlay-pressed : touch.has-hover ? Colors.overlay-hover : root.selected ? Colors.overlay-selected : transparent) : touch.pressed ? #06132d : touch.has-hover ? #153354 : root.selected ? #163353 : #00193f;
     animate background, border-color { duration: 180ms; easing: ease-out; }
     accessible-role: button; accessible-label: root.text;
     accessible-action-default => { root.clicked(); }
@@ -489,13 +606,14 @@ export component AppWindow inherits Window {
         close-menu-timer.running = true;
     }
     public function toggle-sidebar() {
+        root.close-virtual-input-help();
         if root.pending-conflict >= 0 { return; }
         if root.compact {
             if root.compact-menu-open { root.close-sidebar-menu(); }
-            else { root.close-routing-help(); root.close-profile-menu(); root.close-preview-menu(); close-menu-timer.running = false; root.compact-menu-presented = true; root.compact-menu-open = true; root.compact-menu-reveal = 1; sidebar-toggle.focus(); }
+            else { root.close-routing-help(); root.close-device-help(); root.close-profile-menu(); root.close-preview-menu(); close-menu-timer.running = false; root.compact-menu-presented = true; root.compact-menu-open = true; root.compact-menu-reveal = 1; sidebar-toggle.focus(); }
         } else { root.sidebar-expanded = !root.sidebar-expanded; }
     }
-    public function select-page(index: int) { root.page = index; if root.compact-menu-open { root.close-sidebar-menu(); } }
+    public function select-page(index: int) { root.close-device-help(); root.page = index; if root.compact-menu-open { root.close-sidebar-menu(); } }
     property <bool> sidebar-open: root.sidebar-expanded && !root.compact;
     property <bool> log-header-stacked: body-host.width < 740px;
     out property <bool> log-header-fits: log-heading.absolute-position.x >= body-host.absolute-position.x && log-heading.absolute-position.x + log-heading.width <= body-host.absolute-position.x + body-host.width && log-actions.absolute-position.x >= body-host.absolute-position.x && log-actions.absolute-position.x + log-actions.width <= body-host.absolute-position.x + body-host.width && log-actions.absolute-position.y + log-actions.height <= body-host.absolute-position.y + body-host.height;
@@ -504,17 +622,78 @@ export component AppWindow inherits Window {
     default-font-size: 13px;
 
     in-out property <bool> english: false;
-    in-out property <int> page: 0;
+    in-out property <int> page: 0; changed page => { root.close-device-help(); root.close-virtual-input-help(); }
     in-out property <int> target: 100;
     in-out property <int> default-volume: 50;
     in-out property <int> boost: 24;
     in-out property <int> reaction: 1;
     in-out property <int> intensity: 1;
-    in-out property <int> mode: 0; changed mode => { if root.mode == 0 { profile-menu.close-menu(); } }
+    in-out property <int> mode: 0; changed mode => { root.close-virtual-input-help(); if root.mode == 0 { profile-menu.close-menu(); } }
     in-out property <int> profile: 1;
     in property <[EqBand]> eq-bands;
     in-out property <string> volume-notice;
     in-out property <string> audio-error;
+    in property <int> device-refresh-state: 0;
+    in property <bool> output-unavailable: false;
+    in property <bool> source-unavailable: false;
+    property <bool> device-notice-dismissed: false;
+    property <bool> device-notice-visible: root.device-refresh-state != 0 && !root.device-notice-dismissed;
+    property <string> device-notice-text: root.device-refresh-state == 1 ? (root.english ? "Checking audio devices…" : "در حال بررسی دستگاه‌های صوتی…") : root.device-refresh-state == 3 ? (root.english ? "Could not refresh devices. Try Refresh again." : "به‌روزرسانی دستگاه‌ها انجام نشد. دوباره به‌روزرسانی را بزن.") : root.output-unavailable || (root.mode == 1 && root.source-unavailable) ? (root.english ? "Device list updated. Select an available audio device before Run." : "فهرست دستگاه‌ها به‌روز شد. پیش از اجرا، دستگاه صوتیِ در دسترس را انتخاب کن.") : (root.english ? "Device list updated." : "فهرست دستگاه‌ها به‌روز شد.");
+    changed device-refresh-state => {
+        root.device-notice-dismissed = false;
+        device-notice-hold.stop();
+        if root.device-refresh-state == 2 { device-notice-hold.restart(); }
+        root.refresh-notice();
+    }
+    changed device-notice-text => { root.refresh-notice(); }
+    changed device-notice-visible => { root.refresh-notice(); }
+    device-notice-hold := Timer { interval: 3000ms; triggered => { self.stop(); root.device-notice-dismissed = true; } }
+    // Keep the last rendered message through its exit; only fresh content can
+    // replace it. No delayed cleanup can erase a newer notification.
+    out property <string> notice-display-text;
+    property <bool> notice-display-error: false;
+    out property <float> notice-reveal: root.volume-notice != "" || root.audio-error != "" || root.device-notice-visible ? 1 : 0;
+    animate notice-reveal { duration: 200ms; easing: ease-out; }
+    changed volume-notice => { root.refresh-notice(); }
+    changed audio-error => { root.refresh-notice(); }
+    function refresh-notice() {
+        if root.audio-error != "" {
+            root.notice-display-text = root.audio-error;
+            root.notice-display-error = true;
+        } else if root.device-notice-visible {
+            root.notice-display-text = root.device-notice-text;
+            root.notice-display-error = root.device-refresh-state == 3;
+        } else if root.volume-notice != "" {
+            root.notice-display-text = root.volume-notice;
+            root.notice-display-error = false;
+        }
+    }
+    callback show-volume-notice(string);
+    show-volume-notice(text) => {
+        // A fresh user action supersedes completed refresh feedback. Pending
+        // scans and refresh errors keep their priority until dismissed/result.
+        if root.device-refresh-state == 2 { device-notice-hold.stop(); root.device-notice-dismissed = true; }
+        root.volume-notice = text;
+        root.refresh-notice();
+        notice-hold.start();
+        notice-hold.restart();
+    }
+    public function dismiss-notice() {
+        // Close dismisses the whole card, including any messages underneath it.
+        // Dismissing scan feedback does not cancel the scan or change its state.
+        notice-hold.stop();
+        device-notice-hold.stop();
+        root.volume-notice = "";
+        root.audio-error = "";
+        root.device-notice-dismissed = true;
+    }
+    notice-hold := Timer { interval: 3000ms; running: false; triggered => {
+        self.stop();
+        root.volume-notice = "";
+    } }
+    out property <ControlBounds> notice-bounds: {x: notice-card.absolute-position.x, y: notice-card.absolute-position.y, width: notice-card.width, height: notice-card.height};
+    out property <ControlBounds> notice-close-bounds: {x: notice-close.absolute-position.x, y: notice-close.absolute-position.y, width: notice-close.width, height: notice-close.height};
+    out property <ControlBounds> notice-text-bounds: {x: notice-text.absolute-position.x, y: notice-text.absolute-position.y, width: notice-text.width, height: notice-text.height};
     property <int> target-maximum: root.mode == 0 ? 100 : 200;
     property <[string]> profile-names: root.english ? ["System default", "Gentle", "Voice / dialogue", "Music", "Cinema", "Warm & relaxed", "Gaming focus", "Custom equalizer"] : ["پیش‌فرض سیستم", "ملایم", "گفتار و دیالوگ", "موسیقی", "سینما", "گرم و آرام", "تمرکز بازی", "اکولایزر سفارشی"];
     in-out property <int> last-profile: 1;
@@ -547,6 +726,7 @@ export component AppWindow inherits Window {
     changed pending-conflict => { if root.pending-conflict >= 0 { root.dismiss-sidebar-menu(); confirmation-cancel.focus(); } else { sidebar-toggle.focus(); } }
     property <string> pending-name;
     in-out property <bool> sidebar-expanded: true;
+    changed sidebar-expanded => { root.close-virtual-input-help(); }
     out property <string> exact-target-text: exact-target.input-text;
     public function enter-target-text(text: string) { exact-target.enter-text(text); }
     out property <bool> sidebar-on-right: sidebar-panel.x > body-host.x;
@@ -563,6 +743,11 @@ export component AppWindow inherits Window {
     in-out property <int> output-index: 0;
     in-out property <int> source-index: 0;
     in property <[string]> outputs;
+    out property <ControlBounds> output-combo-bounds: {x: playback-device-combo.absolute-position.x, y: playback-device-combo.absolute-position.y, width: playback-device-combo.width, height: playback-device-combo.height};
+    out property <ControlBounds> output-closed-text-bounds: playback-device-combo.closed-text-bounds;
+    out property <ControlBounds> output-closed-icon-bounds: playback-device-combo.closed-icon-bounds;
+    out property <string> output-closed-label: playback-device-combo.closed-label;
+    out property <string> output-full-value: playback-device-combo.full-value;
     in property <[string]> sources;
     in property <bool> running: false;
     in property <bool> paused: false;
@@ -582,6 +767,11 @@ export component AppWindow inherits Window {
     out property <bool> sound-layout-fits: control-strip.x >= 0px && control-strip.x + control-strip.width <= body-host.width && target-card.x >= 0px && target-card.x + target-card.width <= body-host.width && playback-control-field.y + playback-control-field.height <= control-strip.height && sound-cards.width <= sound-scroll.visible-width + 1px;
     out property <length> playback-device-width: playback-device-field.width;
     out property <length> processing-mode-width: processing-mode-field.width;
+    out property <ControlBounds> sound-cards-bounds: {x: sound-cards.absolute-position.x, y: sound-cards.absolute-position.y, width: sound-cards.width, height: sound-cards.height};
+    out property <ControlBounds> sound-control-strip-bounds: {x: control-strip.absolute-position.x, y: control-strip.absolute-position.y, width: control-strip.width, height: control-strip.height};
+    out property <ControlBounds> sound-target-card-bounds: {x: target-card.absolute-position.x, y: target-card.absolute-position.y, width: target-card.width, height: target-card.height};
+    out property <ControlBounds> sound-graph-column-bounds: {x: graph-column.absolute-position.x, y: graph-column.absolute-position.y, width: graph-column.width, height: graph-column.height};
+    out property <ControlBounds> sound-tuning-card-bounds: {x: tuning-card.absolute-position.x, y: tuning-card.absolute-position.y, width: tuning-card.width, height: tuning-card.height};
     in property <bool> limited: false;
     in property <bool> boost-limited: false;
     in property <string> status: "Ready";
@@ -661,6 +851,42 @@ export component AppWindow inherits Window {
     public function close-profile-menu() { profile-menu.close-menu(); }
     public function preview-routing-help() { routing-help.open-help(); }
     public function close-routing-help() { routing-help.close-help(); }
+    out property <bool> routing-help-open: routing-help.help-open;
+    out property <bool> routing-help-trigger-focused: routing-help.trigger-focused;
+    out property <bool> routing-help-close-focused: routing-help.close-focused;
+    out property <ControlBounds> routing-help-bounds: routing-help.panel-bounds;
+    out property <ControlBounds> routing-help-close-bounds: routing-help.close-bounds;
+    out property <ControlBounds> routing-help-trigger-bounds: { x: routing-help.absolute-position.x, y: routing-help.absolute-position.y, width: routing-help.width, height: routing-help.height };
+    public function scroll-routing-help(fraction: float) { routing-help.scroll-help(fraction); }
+    out property <length> routing-help-scroll-range: routing-help.scroll-range;
+    out property <length> routing-help-scroll-offset: routing-help.scroll-offset;
+    out property <string> routing-help-text: routing-help.message;
+    property <int> virtual-input-help-close-request: 0;
+    public function close-virtual-input-help() { root.virtual-input-help-close-request += 1; }
+    property <bool> virtual-input-help-published-open;
+    out property <bool> virtual-input-help-visible: root.mode == 1 && root.page == 0;
+    out property <bool> virtual-input-help-open: root.mode == 1 && root.virtual-input-help-published-open;
+    out property <bool> virtual-input-help-trigger-focused;
+    out property <bool> virtual-input-help-close-focused;
+    out property <ControlBounds> virtual-input-help-bounds;
+    out property <ControlBounds> virtual-input-help-close-bounds;
+    out property <ControlBounds> virtual-input-help-trigger-bounds;
+    out property <ControlBounds> virtual-input-title-bounds;
+    out property <ControlBounds> source-combo-bounds;
+    out property <length> virtual-input-help-scroll-range;
+    out property <length> virtual-input-help-scroll-offset;
+    public function preview-device-help() { device-help.open-help(); }
+    public function close-device-help() { device-help.close-help(); }
+    out property <bool> device-help-open: device-help.help-open;
+    out property <bool> device-help-trigger-focused: device-help.trigger-focused;
+    out property <bool> device-help-close-focused: device-help.close-focused;
+    out property <ControlBounds> device-help-bounds: device-help.panel-bounds;
+    out property <ControlBounds> device-help-close-bounds: device-help.close-bounds;
+    out property <ControlBounds> device-help-trigger-bounds: { x: device-help.absolute-position.x, y: device-help.absolute-position.y, width: device-help.width, height: device-help.height };
+    public function scroll-device-help(fraction: float) { device-help.scroll-help(fraction); }
+    out property <length> device-help-scroll-range: device-help.scroll-range;
+    out property <length> device-help-scroll-offset: device-help.scroll-offset;
+    out property <ControlBounds> device-refresh-button-bounds: { x: device-refresh-action.absolute-position.x, y: device-refresh-action.absolute-position.y, width: device-refresh-action.width, height: device-refresh-action.height };
     out property <bool> scroll-widths-fit: sound-scroll.content-width <= sound-scroll.visible-width + 1px && settings-scroll.content-width <= settings-scroll.visible-width + 1px && components-scroll.content-width <= components-scroll.visible-width + 1px && about-scroll.content-width <= about-scroll.visible-width + 1px;
     out property <bool> sound-bottom-visible: tuning-card.absolute-position.y + tuning-card.height <= sound-scroll.absolute-position.y + sound-scroll.visible-height + 1px;
     out property <length> settings-scroll-offset: settings-scroll.content-y;
@@ -719,20 +945,44 @@ export component AppWindow inherits Window {
                 FlexboxLayout { padding: 12px; flex-direction: FlexboxLayoutDirection.row; flex-wrap: root.stacked ? wrap : no-wrap; alignment: stretch; spacing: 8px;
                     playback-device-field := VerticalLayout { layout-order: 0; height: 54px; width: root.stacked ? (parent.width - 32px) / 2 : root.mode == 1 ? max(120px, (parent.width - 356px) * 4 / 13) : max(120px, (parent.width - 348px) * 4 / 9); spacing: 5px;
                         Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "PLAYBACK DEVICE" : "دستگاه پخش"; color: Colors.muted; font-size: 10px; }
-                        ComboBox { reveal-on-focus: false; min-width: 104px; model: root.outputs; current-index <=> root.output-index; enabled: root.devices-ready && root.recovery-ready && !root.running && !root.busy; selected(value) => { root.config-changed(); } }
+                        playback-device-combo := ComboBox { reveal-on-focus: false; min-width: 104px; model: root.outputs; compact-closed-label: root.output-unavailable ? (root.english ? "Change output" : "تغییر خروجی") : ""; current-index <=> root.output-index; enabled: root.devices-ready && root.recovery-ready && !root.running && !root.busy; selected(value) => { root.config-changed(); } }
                     }
                     processing-mode-field := VerticalLayout { layout-order: root.stacked ? 1 : (Locale.rtl ? -1 : 1); height: 54px; width: root.stacked ? (parent.width - 32px) / 2 : root.mode == 1 ? max(150px, (parent.width - 356px) * 5 / 13) : max(150px, (parent.width - 348px) * 5 / 9); spacing: 5px;
                         Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "PROCESSING MODE" : "حالت پردازش"; color: Colors.muted; font-size: 10px; }
                         ComboBox { reveal-on-focus: false; min-width: 130px; model: root.english ? ["Windows volume", "Full boost / virtual cable"] : ["صدای ویندوز", "بوست کامل / کابل مجازی"]; current-index <=> root.mode; enabled: root.devices-ready && root.recovery-ready && !root.running && !root.busy; selected(value) => { root.config-changed(); } }
                     }
                     if root.mode == 1: virtual-input-field := VerticalLayout { layout-order: root.stacked ? 2 : (Locale.rtl ? -2 : 2); height: 54px; width: root.stacked ? max(150px, parent.width - 340px) : max(120px, (parent.width - 356px) * 4 / 13); spacing: 5px;
-                        Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "VIRTUAL INPUT" : "ورودی مجازی"; color: Colors.muted; font-size: 10px; }
-                        ComboBox { reveal-on-focus: false; min-width: 120px; model: root.sources; current-index <=> root.source-index; enabled: root.devices-ready && root.recovery-ready && !root.running && !root.busy; selected(value) => { root.config-changed(); } }
+                        // The 18px trigger does not contribute to header height.
+                        VirtualInputHeader { context-active: root.mode == 1 && root.page == 0 && !root.compact-menu-open; close-request: root.virtual-input-help-close-request;
+                            // Conditional component outputs publish one way;
+                            // root sinks must not replace their derived bindings.
+                            init => {
+                                root.virtual-input-help-published-open = self.help-open;
+                                root.virtual-input-help-trigger-focused = self.trigger-focused;
+                                root.virtual-input-help-close-focused = self.close-focused;
+                                root.virtual-input-help-bounds = self.panel-bounds;
+                                root.virtual-input-help-close-bounds = self.close-bounds;
+                                root.virtual-input-help-trigger-bounds = self.trigger-bounds;
+                                root.virtual-input-title-bounds = self.title-bounds;
+                                root.virtual-input-help-scroll-range = self.scroll-range;
+                                root.virtual-input-help-scroll-offset = self.scroll-offset;
+                            }
+                            changed help-open => { root.virtual-input-help-published-open = self.help-open; }
+                            changed trigger-focused => { root.virtual-input-help-trigger-focused = self.trigger-focused; }
+                            changed close-focused => { root.virtual-input-help-close-focused = self.close-focused; }
+                            changed panel-bounds => { root.virtual-input-help-bounds = self.panel-bounds; }
+                            changed close-bounds => { root.virtual-input-help-close-bounds = self.close-bounds; }
+                            changed trigger-bounds => { root.virtual-input-help-trigger-bounds = self.trigger-bounds; }
+                            changed title-bounds => { root.virtual-input-title-bounds = self.title-bounds; }
+                            changed scroll-range => { root.virtual-input-help-scroll-range = self.scroll-range; }
+                            changed scroll-offset => { root.virtual-input-help-scroll-offset = self.scroll-offset; }
+                        }
+                        ComboBox { init => { root.source-combo-bounds = self.control-bounds; } changed control-bounds => { root.source-combo-bounds = self.control-bounds; } reveal-on-focus: false; min-width: 120px; model: root.sources; current-index <=> root.source-index; enabled: root.devices-ready && root.recovery-ready && !root.running && !root.busy; selected(value) => { root.config-changed(); } }
                     }
                     playback-control-field := VerticalLayout { layout-order: root.stacked ? 3 : (Locale.rtl ? -3 : 3); height: 54px; width: 268px; spacing: 5px;
                         Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "PLAYBACK CONTROL" : "کنترل پخش"; color: Colors.muted; font-size: 10px; }
                         FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; spacing: 4px;
-                            Action { reveal-on-focus: false; layout-order: 0; width: 50px; text: root.english ? "Run" : "اجرا"; primary: true; enabled: root.devices-ready && root.recovery-ready && !root.running && !root.busy && !root.components-busy; clicked => { root.toggle-audio(); } }
+                            Action { reveal-on-focus: false; layout-order: 0; width: 50px; text: root.english ? "Run" : "اجرا"; primary: true; enabled: root.devices-ready && root.recovery-ready && !root.running && !root.busy && !root.components-busy && root.device-refresh-state != 1 && !root.output-unavailable && (root.mode == 0 || !root.source-unavailable); clicked => { root.toggle-audio(); } }
                             Action { reveal-on-focus: false; layout-order: root.stacked ? 1 : (Locale.rtl ? -1 : 1); width: 50px; text: root.english ? "Stop" : "توقف"; enabled: root.running && !root.busy; clicked => { root.toggle-audio(); } }
                             Action { reveal-on-focus: false; layout-order: root.stacked ? 2 : (Locale.rtl ? -2 : 2); width: 58px; text: root.paused ? (root.english ? "Resume" : "ادامه") : (root.english ? "Pause" : "مکث"); enabled: root.running && !root.busy; clicked => { root.toggle-pause(); } }
                             Rectangle { layout-order: root.stacked ? 3 : (Locale.rtl ? -3 : 3); width: 98px; border-radius: 13px; border-width: 1px; border-color: #345571; background: #0c1b32;
@@ -741,8 +991,14 @@ export component AppWindow inherits Window {
                         }
                     }
                     refresh-field := VerticalLayout { layout-order: root.stacked ? 4 : (Locale.rtl ? -4 : 4); height: 54px; width: 32px; spacing: 5px;
-                        Rectangle { height: 14px; background: transparent; }
-                        Action { reveal-on-focus: false; width: 32px; text: ""; accessible-label: root.english ? "Refresh devices" : "به‌روزرسانی دستگاه‌ها"; enabled: !root.running && !root.busy; clicked => { root.refresh-devices(); }
+                        Rectangle { height: 14px; background: transparent;
+                            device-help := HelpButton { x: 7px; y: -2px; reveal-on-focus: false; expanded-help: true; help-width: 340px; help-height: 250px;
+                                title: root.english ? "Refresh devices" : "به‌روزرسانی دستگاه‌ها";
+                                label: root.english ? "Explain refreshing audio devices" : "راهنمای به‌روزرسانی دستگاه‌های صوتی";
+                                message: root.english ? "Refresh updates the device list; it does not reconnect active audio.\n\n1. Press Stop, even if processing is paused.\n2. Connect your headphones, then press Refresh.\n3. Select the playback device and, if needed, the virtual input. Press Run." + (root.mode == 1 ? "\n\nIn Full boost mode, if audio is playing but the graph stays flat, check the virtual input and audio routing. A flat graph during silence is normal.\n\nSystem default is resolved when you press Run; it does not follow later Windows device changes." : "") : "این دکمه فهرست دستگاه‌ها را تازه می‌کند؛ اتصال صوتی فعال را دوباره برقرار نمی‌کند.\n\n۱. حتی در حالت مکث، ابتدا توقف را بزن.\n۲. هدفون را وصل کن، سپس به‌روزرسانی را بزن.\n۳. دستگاه پخش و در صورت نیاز ورودی مجازی را انتخاب کن؛ سپس اجرا را بزن." + (root.mode == 1 ? "\n\nدر حالت بوست کامل، اگر صدا در حال پخش است اما نمودار حرکت نمی‌کند، ورودی مجازی و مسیر صدا را بررسی کن. ثابت‌بودن نمودار هنگام سکوت عادی است.\n\n«خروجی پیش‌فرض ویندوز» هنگام اجرا مشخص می‌شود؛ تغییر بعدی دستگاه در ویندوز را دنبال نمی‌کند." : "");
+                            }
+                        }
+                        device-refresh-action := Action { reveal-on-focus: false; width: 32px; text: ""; accessible-label: root.english ? "Refresh devices" : "به‌روزرسانی دستگاه‌ها"; enabled: !root.running && !root.busy && !root.components-busy && root.device-refresh-state != 1; clicked => { root.refresh-devices(); }
                             Image { source: @image-url("../assets/refresh.svg"); width: 17px; height: 17px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
                         }
                     }
@@ -800,7 +1056,7 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-                VerticalLayout { min-height: root.profile == 7 ? 552px : 362px; layout-order: root.stacked ? 1 : (Locale.rtl ? -1 : 1); horizontal-stretch: 1; spacing: 12px;
+                graph-column := VerticalLayout { min-height: root.profile == 7 ? 552px : 362px; layout-order: root.stacked ? 1 : (Locale.rtl ? -1 : 1); horizontal-stretch: 1; spacing: 12px;
                     Rectangle {
                         vertical-stretch: 1; min-height: 148px; border-radius: 24px; background: Colors.panel; border-width: 1px; border-color: #41567780;
                         VerticalLayout {
@@ -857,11 +1113,11 @@ export component AppWindow inherits Window {
                             }
                             VerticalLayout { layout-order: Locale.rtl ? -2 : 2; width: 165px; spacing: 6px; alignment: start;
                                 FlexboxLayout { height: 18px; flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: Locale.rtl ? end : start; spacing: 4px;
-                                    Text { layout-order: Locale.rtl ? 1 : 0; text: root.english ? "VIRTUAL-CABLE ROUTING" : "هدایت به کابل مجازی"; color: Colors.muted; font-size: 10px; vertical-alignment: center; }
-                                    routing-help := HelpButton { layout-order: Locale.rtl ? 0 : 1; title: root.english ? "Automatic routing" : "هدایت خودکار"; message: root.english ? "On: temporarily sends Windows default audio to the virtual cable and restores it on Stop.\nOff: use manual or per-app cable routing." : "روشن: خروجی پیش‌فرض ویندوز را موقتاً به کابل مجازی هدایت می‌کند و با توقف برمی‌گرداند.\nخاموش: مسیر کابل را دستی یا برای هر برنامه جداگانه تنظیم کن."; label: root.english ? "Explain virtual-cable routing" : "توضیح هدایت به کابل مجازی"; }
+                                    Text { layout-order: Locale.rtl ? 1 : 0; text: root.english ? "AUDIO ROUTING" : "هدایت صدا"; color: Colors.muted; font-size: 10px; vertical-alignment: center; }
+                                    routing-help := HelpButton { layout-order: Locale.rtl ? 0 : 1; expanded-help: true; help-width: 330px; help-height: 220px; title: root.english ? "Automatic routing" : "هدایت خودکار"; message: root.mode == 1 ? (root.english ? "Run sends Windows default sound through the selected virtual cable to your playback device. Stop returns Windows sound to speakers or headphones.\n\nOff: Windows defaults stay unchanged.\n\nApps with their own output settings may use a different route." : "با اجرا، صدای پیش‌فرض ویندوز از کابل مجازی انتخاب‌شده به دستگاه پخش می‌رسد. با توقف، صدای ویندوز به بلندگو یا هدفون برمی‌گردد.\n\nخاموش: پیش‌فرض‌های ویندوز تغییر نمی‌کنند.\n\nبرنامه‌هایی که خروجی جداگانه دارند ممکن است مسیر دیگری داشته باشند.") : (root.english ? "If Windows uses the selected virtual cable, Run switches that sound to your playback device. This change stays after Stop.\n\nOff: Windows defaults stay unchanged.\n\nApps with their own output settings may use a different route." : "اگر ویندوز از کابل مجازی انتخاب‌شده استفاده کند، با اجرا آن صدا به دستگاه پخش هدایت می‌شود. این تغییر پس از توقف باقی می‌ماند.\n\nخاموش: پیش‌فرض‌های ویندوز تغییر نمی‌کنند.\n\nبرنامه‌هایی که خروجی جداگانه دارند ممکن است مسیر دیگری داشته باشند."); label: root.english ? "Explain audio routing" : "توضیح هدایت صدا"; }
                                 }
-                                Toggle { text: root.english ? "Automatic" : "خودکار"; checked <=> root.auto-route; enabled: root.mode == 1 && !root.running && !root.busy; toggled => { root.config-changed(); } }
-                                Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "Changes defaults · restored on Stop" : "تغییر پیش‌فرض‌ها؛ بازگشت در توقف"; color: #8399b8; font-size: 9px; height: 12px; }
+                                Toggle { text: root.english ? "Automatic" : "خودکار"; checked <=> root.auto-route; enabled: !root.running && !root.busy; toggled => { root.config-changed(); } }
+                                Text { horizontal-alignment: Locale.rtl ? right : left; text: root.mode == 1 ? (root.english ? "Returns to playback devices on Stop" : "بازگشت به دستگاه پخش با توقف") : (root.english ? "Playback output stays after Stop" : "حفظ خروجی پخش پس از توقف"); color: #8399b8; font-size: 9px; height: 12px; }
                             }
                         }
                     }
@@ -869,11 +1125,14 @@ export component AppWindow inherits Window {
             }
         }
         }
-        if root.volume-notice != "" || root.audio-error != "": Rectangle { x: 23px; y: parent.height - self.height - 23px; width: parent.width - 46px; height: 70px; border-radius: 18px; background: #112743f5; border-width: 1px; border-color: #73cddb; drop-shadow-color: #00000070; drop-shadow-blur: 18px;
-            FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: stretch; padding: 14px; spacing: 12px;
-                Text { layout-order: Locale.rtl ? 0 : 0; horizontal-stretch: 1; horizontal-alignment: Locale.rtl ? right : left; text: root.audio-error != "" ? root.audio-error : root.volume-notice; color: root.audio-error != "" ? #ffc1a1 : #c2eefa; wrap: word-wrap; vertical-alignment: center; font-size: 12px; }
-                Action { layout-order: Locale.rtl ? -1 : 1; text: "×"; width: 36px; clicked => { root.volume-notice = ""; root.audio-error = ""; } }
-            }
+        notice-card := Rectangle { visible: root.notice-reveal > 0; clip: true; x: (parent.width - self.width) / 2; y: parent.height - self.height - 23px + (1 - root.notice-reveal) * (self.height + 46px); width: min(parent.width - 46px, 520px, max(230px, notice-measure.preferred-width + 76px)); height: max(54px, notice-text.preferred-height + 22px); border-radius: 18px; background: transparent; drop-shadow-color: #0000004d; drop-shadow-blur: 18px; drop-shadow-offset-y: 3px;
+            animate height { duration: 200ms; easing: ease-out; }
+            Image { width: parent.width; height: parent.height; source: @image-url("../assets/surface-notice.png", nine-slice(18)); }
+            notice-measure := Text { visible: false; text: root.notice-display-text; font-size: 12px; }
+            // Center in the space beside the close circle: 18px outer inset,
+            // 11px gap, 36px circle and 11px close inset; mirror once for RTL.
+            notice-text := Text { x: Locale.rtl ? 58px : 18px; y: 11px; width: parent.width - 76px; height: parent.height - 22px; horizontal-alignment: center; text: root.notice-display-text; color: root.notice-display-error ? #ffc1a1 : Colors.text; wrap: word-wrap; vertical-alignment: center; font-size: 12px; }
+            notice-close := Action { x: Locale.rtl ? 11px : parent.width - self.width - 11px; y: (parent.height - self.height) / 2; text: "×"; accessible-label: root.english ? "Dismiss notification" : "بستن پیام"; reveal-on-focus: false; width: 36px; height: 36px; corner-radius: 18px; icon-only: true; glyph-size: 14px; glyph-color: #cbd9ed; clicked => { root.dismiss-notice(); } }
         }
         }
 
@@ -1138,14 +1397,15 @@ export component AppWindow inherits Window {
         sidebar-panel := Rectangle { x: (Locale.rtl ? root.width - self.width : 0px) + (root.compact-menu-presented ? (Locale.rtl ? 1 : -1) * (1 - root.compact-menu-reveal) * 132px : 0px); y: 0px; height: root.height;
             width: root.compact-menu-presented ? 216px : sidebar-slot.width;
 
-            background: @linear-gradient(180deg, #172338ee 0%, #0b1329f5 100%);
-            border-width: 1px; border-color: #40547470; clip: true;
+            background: root.compact-menu-presented ? Colors.overlay : @linear-gradient(180deg, #172338ee 0%, #0b1329f5 100%);
+            border-width: 1px; border-color: root.compact-menu-presented ? Colors.overlay-border : #40547470; clip: true;
+            drop-shadow-color: root.compact-menu-presented ? #0000004d : transparent; drop-shadow-blur: 18px;
             TouchArea { scroll-event(event) => { return accept; } }
             VerticalLayout { padding: 16px; spacing: 8px;
                 FlexboxLayout { flex-direction: FlexboxLayoutDirection.row; flex-wrap: no-wrap; alignment: (root.sidebar-open || root.compact-menu-presented) ? stretch : center; height: 43px; spacing: (root.sidebar-open || root.compact-menu-presented) ? 10px : 0px;
 
                     if (root.sidebar-open || root.compact-menu-presented): Rectangle { layout-order: Locale.rtl ? -1 : 1; horizontal-stretch: 1; background: transparent; }
-                    sidebar-toggle := Action { layout-order: Locale.rtl ? -2 : 2; text: ""; accessible-label: "Toggle sidebar";  width: 36px; clicked => { root.toggle-sidebar(); }
+                    sidebar-toggle := Action { layout-order: Locale.rtl ? -2 : 2; text: ""; accessible-label: "Toggle sidebar"; width: 36px; corner-radius: root.compact-menu-presented ? 18px : 14px; icon-only: root.compact-menu-presented; clicked => { root.toggle-sidebar(); }
                         Image { source: ((root.sidebar-open || root.compact-menu-presented) == Locale.rtl) ? @image-url("../assets/chevron-right.svg") : @image-url("../assets/chevron-left.svg"); width: 20px; height: 20px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
                     }
                 }
@@ -1156,12 +1416,12 @@ export component AppWindow inherits Window {
                 }
                 Rectangle { height: 1px; background: #41567765; }
                 sidebar-scroll := ScrollView { vertical-stretch: 1; horizontal-stretch: 1; VerticalLayout { spacing: 6px;
-                sound-nav := NavAction { order: 0; text: root.english ? "Sound" : "صدا"; icon: @image-url("../assets/nav-sound.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); selected: root.page == 0; clicked => { root.select-page(0); } }
-                components-nav := NavAction { order: 2; text: root.english ? "Components" : "افزونه‌ها"; icon: @image-url("../assets/nav-components.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); selected: root.page == 1; clicked => { root.select-page(1); } }
-                log-nav := NavAction { order: 3; text: root.log-label; icon: @image-url("../assets/nav-log.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); selected: root.page == 2; clicked => { root.select-page(2); } }
-                settings-nav := NavAction { order: 4; text: root.english ? "Settings" : "تنظیمات"; icon: @image-url("../assets/nav-settings.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); selected: root.page == 4; clicked => { root.select-page(4); } }
-                conflicts-nav := NavAction { order: 5; text: (root.english ? "Audio conflicts" : "تداخل صوتی") + (root.conflicts.length > 0 ? " (" + root.conflicts.length + ")" : ""); icon: @image-url("../assets/nav-conflicts.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); selected: root.page == 5; clicked => { root.select-page(5); root.refresh-conflicts(); } }
-                about-nav := NavAction { order: 6; text: root.english ? "About" : "درباره برنامه"; icon: @image-url("../assets/nav-about.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); selected: root.page == 6; clicked => { root.select-page(6); } }
+                sound-nav := NavAction { order: 0; text: root.english ? "Sound" : "صدا"; icon: @image-url("../assets/nav-sound.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); overlay: root.compact-menu-presented; selected: root.page == 0; clicked => { root.select-page(0); } }
+                components-nav := NavAction { order: 2; text: root.english ? "Components" : "افزونه‌ها"; icon: @image-url("../assets/nav-components.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); overlay: root.compact-menu-presented; selected: root.page == 1; clicked => { root.select-page(1); } }
+                log-nav := NavAction { order: 3; text: root.log-label; icon: @image-url("../assets/nav-log.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); overlay: root.compact-menu-presented; selected: root.page == 2; clicked => { root.select-page(2); } }
+                settings-nav := NavAction { order: 4; text: root.english ? "Settings" : "تنظیمات"; icon: @image-url("../assets/nav-settings.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); overlay: root.compact-menu-presented; selected: root.page == 4; clicked => { root.select-page(4); } }
+                conflicts-nav := NavAction { order: 5; text: (root.english ? "Audio conflicts" : "تداخل صوتی") + (root.conflicts.length > 0 ? " (" + root.conflicts.length + ")" : ""); icon: @image-url("../assets/nav-conflicts.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); overlay: root.compact-menu-presented; selected: root.page == 5; clicked => { root.select-page(5); root.refresh-conflicts(); } }
+                about-nav := NavAction { order: 6; text: root.english ? "About" : "درباره برنامه"; icon: @image-url("../assets/nav-about.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); overlay: root.compact-menu-presented; selected: root.page == 6; clicked => { root.select-page(6); } }
                 if root.cable-warning-visible: Rectangle {
                     height: (root.sidebar-open || root.compact-menu-presented) ? 105px : 38px;
                     background: #503a2233; border-radius: 12px; border-width: 1px; border-color: #d5a16670;
@@ -1169,18 +1429,18 @@ export component AppWindow inherits Window {
                     TouchArea { mouse-cursor: pointer; clicked => { root.select-page(1); } }
                 }
                 Rectangle { min-height: 0px; vertical-stretch: 1; background: transparent; }
-                donate-nav := NavAction { text: root.english ? "Donate" : "دونیت"; icon: @image-url("../assets/nav-donate.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); clicked => { root.open-link("https://maxispace.dev/donate"); } }
-                language-nav := NavAction { text: root.english ? "فارسی / FA" : "English / EN"; icon: @image-url("../assets/nav-language.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); clicked => { root.english = !root.english; root.config-changed(); } }
+                donate-nav := NavAction { text: root.english ? "Donate" : "دونیت"; icon: @image-url("../assets/nav-donate.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); overlay: root.compact-menu-presented; clicked => { root.open-link("https://maxispace.dev/donate"); } }
+                language-nav := NavAction { text: root.english ? "فارسی / FA" : "English / EN"; icon: @image-url("../assets/nav-language.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); overlay: root.compact-menu-presented; clicked => { root.english = !root.english; root.config-changed(); } }
                 if (root.sidebar-open || root.compact-menu-presented): Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "X keeps the app running in the tray." : "ضربدر: ادامهٔ اجرا کنار ساعت"; color: Colors.muted; font-size: 10px; wrap: word-wrap; }
-                exit-nav := NavAction { text: root.english ? "Exit app" : "خروج از برنامه"; icon: @image-url("../assets/nav-exit.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); clicked => { root.exit-app(); } }
-                Text { text: root.version-label; color: Colors.muted; font-size: 10px; horizontal-alignment: center; }
+                exit-nav := NavAction { text: root.english ? "Exit app" : "خروج از برنامه"; icon: @image-url("../assets/nav-exit.svg"); expanded: (root.sidebar-open || root.compact-menu-presented); overlay: root.compact-menu-presented; clicked => { root.exit-app(); } }
                 } }
             }
             TouchArea { visible: root.compact-menu-presented && !root.compact-menu-open; y: 60px; width: parent.width; height: parent.height - 60px; clicked => { } scroll-event(event) => { return accept; } }
         }
     Rectangle { visible: root.pending-conflict >= 0; background: #020716b0;
         TouchArea { }
-        Rectangle { width: min(465px, parent.width - 24px); height: min(230px, parent.height - 24px); x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; border-radius: 26px; background: #10223e; border-width: 1px; border-color: Colors.accent;
+        Rectangle { width: min(465px, parent.width - 24px); height: min(230px, parent.height - 24px); x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; border-radius: 26px; background: transparent; drop-shadow-color: #0000004d; drop-shadow-blur: 18px; drop-shadow-offset-y: 4px;
+            Image { width: parent.width; height: parent.height; source: @image-url("../assets/surface-modal.png", nine-slice(26)); }
             VerticalLayout { padding: 25px; spacing: 16px;
                 Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "End " + root.pending-name + "?" : "بستن " + root.pending-name + "؟"; color: Colors.text; font-size: 20px; font-weight: 700; wrap: word-wrap; }
                 Text { horizontal-alignment: Locale.rtl ? right : left; text: root.english ? "This ends the selected app immediately. Unsaved changes in it may be lost." : "این کار برنامهٔ انتخاب‌شده را کامل می‌بندد. تغییرات ذخیره‌نشدهٔ آن ممکن است از دست بروند."; color: Colors.muted; wrap: word-wrap; font-size: 12px; }

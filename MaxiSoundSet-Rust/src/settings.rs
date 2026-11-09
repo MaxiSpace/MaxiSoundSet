@@ -28,6 +28,7 @@ pub struct Settings {
     pub output_id: String,
     pub source_id: String,
     pub auto_route: bool,
+    pub last_physical_output_id: String,
     pub debug_log: bool,
     pub english: bool,
 }
@@ -52,6 +53,7 @@ impl Default for Settings {
             output_id: String::new(),
             source_id: String::new(),
             auto_route: true,
+            last_physical_output_id: String::new(),
             debug_log: false,
             english: false,
         }
@@ -165,6 +167,17 @@ pub fn write_json<T: Serialize>(file: &Path, value: &T) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verified_output_hint_migrates_and_persists_without_changing_user_selection() {
+        let mut settings: Settings = serde_json::from_str(r#"{"output_id":"","source_id":"chosen-cable","auto_route":false}"#).unwrap();
+        assert!(settings.last_physical_output_id.is_empty());
+        settings.last_physical_output_id = "verified-endpoint".into();
+        let reloaded: Settings = serde_json::from_slice(&serde_json::to_vec(&settings).unwrap()).unwrap();
+        assert_eq!(reloaded.last_physical_output_id, "verified-endpoint");
+        assert_eq!(reloaded.source_id, "chosen-cable");
+        assert!(reloaded.output_id.is_empty() && !reloaded.auto_route);
+    }
 
     #[test]
     fn windows_target_is_capped_while_full_boost_and_custom_eq_survive_reload() {

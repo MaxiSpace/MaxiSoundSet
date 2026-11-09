@@ -141,12 +141,71 @@ pub fn manifest(root: &Path) -> Result<Manifest> {
     );
     Ok(m)
 }
+pub fn install_target_running(request: &Path) -> Result<bool> {
+    let root = safe_root(request)?;
+    if !root.join(MARKER).try_exists()? {
+        return Ok(false);
+    }
+    manifest(&root)?;
+    validate_data_directory(&root)?;
+    validate_integrated_target(&root)?;
+    crate::running_app::is_running(&root)
+}
+
+fn validate_integrated_target(root: &Path) -> Result<()> {
+    if let Some(path) = platform::text(platform::UNINSTALL_KEY, "InstallLocation")? {
+        ensure!(
+            platform::same(Path::new(&path), root),
+            "A different installation is already registered at {path}. Uninstall it before choosing another folder."
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub struct InstallAppRunning;
+
+impl std::fmt::Display for InstallAppRunning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MAXI SOUNDSET is running at the selected installation location")
+    }
+}
+
+impl std::error::Error for InstallAppRunning {}
+
+fn check_install_target(root: &Path, integrated: bool) -> Result<()> {
+    validate_data_directory(root)?;
+    if integrated {
+        validate_integrated_target(root)?;
+    }
+    if root.try_exists()? {
+        ensure!(root.is_dir(), "Install location is not a folder");
+        if root.join(MARKER).try_exists()? {
+            manifest(root)?;
+            ensure!(!crate::running_app::is_running(root)?, InstallAppRunning);
+        } else {
+            for name in FILES {
+                ensure!(
+                    !root.join(name).try_exists()?,
+                    "Existing files are not owned by the installer: {}",
+                    root.join(name).display()
+                );
+            }
+        }
+    }
+    ensure!(
+        !root.join("Data/recovery.json").try_exists()?,
+        "Open the app and use Stop / Exit app to restore audio before updating"
+    );
+    Ok(())
+}
+
 fn writable(file: &Path) -> Result<()> {
     no_links(file)?;
     if file.exists() {
         OpenOptions::new().write(true).open(file).with_context(|| {
             format!(
-                "Close MAXI SOUNDSET with Exit app, or check write permissions: {}",
+                "Check for a file in use or missing write permission: {}",
                 file.display()
             )
         })?;
@@ -181,25 +240,7 @@ pub fn install(
     ensure!(options.accepted, "Accept the agreement before installation");
     let _root_lease = platform::acquire_root_lease(request)?;
     let root = safe_root(request)?;
-    validate_data_directory(&root)?;
-    if root.exists() {
-        ensure!(root.is_dir(), "Install location is not a folder");
-        if root.join(MARKER).exists() {
-            manifest(&root)?;
-        } else {
-            for n in FILES {
-                ensure!(
-                    !root.join(n).exists(),
-                    "Existing files are not owned by the installer: {}",
-                    root.join(n).display()
-                )
-            }
-        }
-    }
-    ensure!(
-        !root.join("Data/recovery.json").exists(),
-        "Open the app and use Stop / Exit app to restore audio before updating"
-    );
+    check_install_target(&root, options.integrated)?;
     for n in FILES.into_iter().chain([MARKER]) {
         writable(&root.join(n))?
     }
@@ -221,11 +262,6 @@ pub fn install(
     } else {
         None
     };
-    if options.integrated {
-        if let Some(p) = platform::text(platform::UNINSTALL_KEY, "InstallLocation")? {
-            ensure!(platform::same(Path::new(&p),&root),"A different installation is already registered at {p}. Uninstall it before choosing another folder.")
-        }
-    }
     let links = if options.integrated {
         platform::shortcut_paths(options.desktop)?
     } else {
@@ -253,6 +289,7 @@ pub fn install(
     let mut installed: Vec<String> = Vec::new();
     let mut old_settings_taken = false;
     let mut new_settings_installed = false;
+    let mut integration_started = false;
     let result = (|| -> Result<()> {
         progress(0.04);
         fs::write(
@@ -287,6 +324,8 @@ pub fn install(
             sha256: format!("{:x}", Sha256::digest(APP)),
         };
         fs::write(stage.join(MARKER), serde_json::to_vec_pretty(&m)?)?;
+        // The app can be reopened while the payload is being staged.
+        check_install_target(&root, options.integrated)?;
         for n in FILES.into_iter().chain([MARKER]) {
             let dst = root.join(n);
             if dst.exists() {
@@ -305,6 +344,7 @@ pub fn install(
         new_settings_installed = true;
         progress(0.8);
         if options.integrated {
+            integration_started = true;
             for (p, t) in &links {
                 fs::create_dir_all(p.parent().unwrap())?;
                 platform::shortcut(p, &root.join(t))?
@@ -331,12 +371,12 @@ pub fn install(
                 failed.push(e.to_string());
             }
         }
-        if let Some(s) = snapshot {
+        if let Some(s) = snapshot.filter(|_| integration_started) {
             if let Err(e) = s.restore() {
                 failed.push(e.to_string())
             }
         }
-        for (p, data) in old_links {
+        for (p, data) in old_links.into_iter().filter(|_| integration_started) {
             let r = if let Some(d) = data {
                 fs::write(&p, d)
             } else if p.exists() {
@@ -488,6 +528,83 @@ mod update_tests {
     }
     fn contents() -> Vec<(&'static str,&'static [u8])> { FILES.into_iter().filter(|n|*n!="Uninstall.exe").map(|n|(n,b"new owned fixture".as_slice())).collect() }
     fn files(root:&Path) -> Vec<(String,Vec<u8>)> { FILES.into_iter().chain([MARKER,"Data/settings.json","Data/other.bin"]).map(|n|(n.into(),fs::read(root.join(n)).unwrap())).collect() }
+    #[test]
+    #[ignore = "inert worker launched by the installer running-target regression test"]
+    fn install_running_fixture_child() {
+        use std::io::Read;
+        assert_eq!(
+            std::env::current_exe().unwrap().file_name().unwrap(),
+            "MaxiSoundSet.exe"
+        );
+        assert_eq!(std::io::stdin().read(&mut [0]).unwrap(), 0);
+    }
+
+    #[test]
+    fn install_refuses_running_target_before_and_after_staging_then_retries() {
+        use std::{os::windows::process::CommandExt, process::{Command, Stdio}};
+        use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+
+        let (sandbox, root, setup, scope) = fixture();
+        let executable = root.join("MaxiSoundSet.exe");
+        fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+        fs::write(root.join("Data/settings.json"), r#"{"personal":"keep"}"#).unwrap();
+        let before = files(&root);
+        let options = Options {
+            accepted: true, desktop: false, startup: false, integrated: false, english: true,
+        };
+        let spawn = || {
+            Command::new(&executable)
+                .args(["--exact", "--ignored", "operations::update_tests::install_running_fixture_child"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .creation_flags(CREATE_NO_WINDOW.0)
+                .spawn()
+                .unwrap()
+        };
+        let assert_stopped_install = |result: Result<PathBuf>| {
+            let error = result.unwrap_err();
+            assert!(error.is::<InstallAppRunning>(), "{error:#}");
+            assert_eq!(files(&root), before);
+            assert!(!fs::read_dir(&root).unwrap().any(|entry| {
+                entry.unwrap().file_name().to_string_lossy().starts_with(".maxi-stage-")
+            }));
+        };
+
+        let mut child = spawn();
+        assert!(install_target_running(&root).unwrap());
+        let case_alias = sandbox.join("I");
+        if case_alias.is_dir() {
+            assert!(install_target_running(&case_alias).unwrap());
+        }
+        fs::write(sandbox.join("MaxiSoundSet.exe"), b"separate image path").unwrap();
+        assert!(!crate::running_app::is_running(&sandbox).unwrap());
+        assert_stopped_install(install(&root, &setup, options.clone(), |_| {
+            panic!("install started staging while the target was running");
+        }));
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+
+        let mut reopened = None;
+        let result = install(&root, &setup, options.clone(), |_| {
+            if reopened.is_none() {
+                reopened = Some(spawn());
+            }
+        });
+        assert_stopped_install(result);
+        let mut child = reopened.expect("install must stage before the second check");
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+
+        assert!(!install_target_running(&root).unwrap());
+        assert_eq!(install(&root, &setup, options, |_| {}).unwrap(), root);
+        let settings: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.join("Data/settings.json")).unwrap()).unwrap();
+        assert_eq!(settings["personal"], "keep");
+        drop(scope);
+        fs::remove_dir_all(sandbox).unwrap();
+    }
+
     #[test] fn update_keeps_data_and_startup_bytes_until_commit() {
         let (sandbox,root,setup,scope) = fixture(); let before = files(&root); let startup = platform::text(platform::RUN_KEY,"MaxiSoundSet").unwrap();
         let links = platform::shortcut_paths(true).unwrap();
@@ -540,6 +657,211 @@ mod update_tests {
         fs::write(root.join("Data/recovery.json"),b"invalid fixture recovery").unwrap();
         assert!(transaction.rollback().is_err()); assert_eq!(files(&root),before); assert!(transaction.stage.join("old-MaxiSoundSet.exe").exists());
         drop(scope); fs::remove_dir_all(sandbox).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod native_upgrade_verification {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    const OLD_SHA256: &str = "c71f3d2573ad848dca778e38479293e39b15f5e294401ef255dfb8609b8da5e5";
+    type Tree = BTreeMap<PathBuf, Vec<u8>>;
+
+    fn tree(root: &Path, directory: &Path) -> Result<Tree> {
+        no_links(directory)?;
+        let mut files = Tree::new();
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            no_links(&path)?;
+            if entry.file_type()?.is_dir() {
+                files.extend(tree(root, &path)?);
+            } else {
+                ensure!(entry.file_type()?.is_file(), "Unexpected fixture member: {}", path.display());
+                files.insert(path.strip_prefix(root)?.into(), fs::read(path)?);
+            }
+        }
+        Ok(files)
+    }
+    fn hashes(files: &Tree) -> serde_json::Value {
+        serde_json::Value::Array(files.iter().map(|(path, bytes)| {
+            serde_json::json!({"path":path,"size":bytes.len(),"sha256":format!("{:x}",Sha256::digest(bytes))})
+        }).collect())
+    }
+    fn preserved(files: &Tree) -> Tree {
+        files.iter().filter(|(path, _)| !FILES.iter().chain([&MARKER]).any(|name| path.as_path() == Path::new(name)))
+            .map(|(path, bytes)| (path.clone(), bytes.clone())).collect()
+    }
+    fn stable_registry(record: &serde_json::Value) -> serde_json::Value {
+        let mut stable = record.clone();
+        stable["values"].as_array_mut().unwrap().retain(|value| {
+            !["DisplayVersion", "EstimatedSize"].contains(&value["name"].as_str().unwrap())
+        });
+        stable
+    }
+    fn no_stage(root: &Path) -> Result<()> {
+        for entry in fs::read_dir(root)? {
+            ensure!(!entry?.file_name().to_string_lossy().starts_with(".maxi-update-"), "Update stage was retained");
+        }
+        Ok(())
+    }
+    fn run_case(directory: &Path, old: &[u8], setup: &Path, fail_metadata: bool) -> Result<serde_json::Value> {
+        // A fresh private directory is retained as evidence. TestScope removes only its
+        // Desktop/Programs and nonce registry subtree when this same-thread scope ends.
+        fs::create_dir(directory)?;
+        let directory = local_canonical(directory)?;
+        no_links(&directory)?;
+        let root = directory.join("App");
+        fs::create_dir_all(root.join("Data/logs"))?;
+        let root = local_canonical(&root)?;
+        let _scope = platform::TestScope::new(&directory, true)?;
+        let _com = platform::Com::new().context("Native Shell Link COM is unavailable; no emulated fallback is permitted")?;
+        let _lease = platform::acquire_root_lease(&root)?;
+        for (name, bytes) in payload() { fs::write(root.join(name), bytes)?; }
+        fs::write(root.join("MaxiSoundSet.exe"), old)?;
+        fs::copy(setup, root.join("Uninstall.exe"))?;
+        fs::write(root.join("Data/settings.json"), br#"{
+  "startup": true, "english": true, "target": 67, "boost_db": 19,
+  "hotkeys": [
+    {"enabled":true,"modifiers":3,"virtual_key":119},
+    {"enabled":true,"modifiers":6,"virtual_key":38},
+    {"enabled":true,"modifiers":6,"virtual_key":40},
+    {"enabled":false,"modifiers":1,"virtual_key":45},
+    {"enabled":true,"modifiers":1,"virtual_key":36},
+    {"enabled":true,"modifiers":1,"virtual_key":46},
+    {"enabled":true,"modifiers":3,"virtual_key":76},
+    {"enabled":true,"modifiers":6,"virtual_key":76},
+    {"enabled":true,"modifiers":3,"virtual_key":69},
+    {"enabled":true,"modifiers":6,"virtual_key":69},
+    {"enabled":true,"modifiers":3,"virtual_key":84},
+    {"enabled":true,"modifiers":0,"virtual_key":175},
+    {"enabled":true,"modifiers":0,"virtual_key":174},
+    {"enabled":false,"modifiers":0,"virtual_key":173}
+  ],
+  "user_extension": {"keep": "exact whitespace and unknown keys"}
+}
+"#)?;
+        fs::write(root.join("Data/hotkeys.json"), b"{\"personal\":\"Alt+F9\"}\r\n")?;
+        fs::write(root.join("Data/other.bin"), [0, 1, 127, 255, 0])?;
+        fs::write(root.join("Data/logs/session.log"), b"personal log\r\n\0\xff")?;
+        fs::write(root.join("unrelated.txt"), b"user-owned unrelated file\r\n")?;
+        let old_manifest = Manifest { identity:MAGIC.into(), root:root.clone(), version:"1.0.3".into(),
+            files:FILES.iter().map(|name|name.to_string()).collect(), desktop:true, startup:true,
+            integrated:true, sha256:OLD_SHA256.into() };
+        fs::write(root.join(MARKER), serde_json::to_vec_pretty(&old_manifest)?)?;
+        platform::register(&root, "1.0.3", true, 42)?;
+        let startup = format!("\"{}\" --startup  --fixture-preserve", root.join("MaxiSoundSet.exe").display());
+        platform::test_set_startup(&startup)?;
+        let links = platform::shortcut_paths(true)?;
+        for (path, target) in &links {
+            ensure!(path.starts_with(directory.join("Desktop")) || path.starts_with(directory.join("Programs")), "Shortcut escaped fixture");
+            no_links(path)?;
+            fs::create_dir_all(path.parent().context("Missing fixture shortcut parent")?)?;
+            platform::shortcut(path, &root.join(target)).context("Native Shell Link creation failed; no emulated fallback is permitted")?;
+            ensure!(platform::same(&platform::shortcut_target(path)?, &root.join(target)), "Native Shell Link target differs");
+        }
+        let link_bytes: Vec<_> = links.iter().map(|(path, _)| Ok((path.clone(), fs::read(path)?))).collect::<Result<_>>()?;
+        let before = tree(&root, &root)?;
+        let registry_before = platform::test_native_registry_record()?;
+        // validate_target verifies identity, root, full owned-file list and authentic
+        // old payload hash. The real preflight then verifies embedded PE/version,
+        // isolated registered root, permissions, absence of links and retained stages.
+        let (_, validated) = crate::update_handoff::validate_target(&root, &root.join("MaxiSoundSet.exe"))?;
+        ensure!(validated.version == "1.0.3", "Old installation version differs");
+        ensure!(crate::cable_evidence::recovery(&root.join("Data")) == crate::cable_evidence::Recovery::Clear, "Fixture recovery is not clear");
+        preflight_update(&root, setup, VERSION)?;
+        ensure!(tree(&root, &root)? == before && platform::test_native_registry_record()? == registry_before, "Preflight changed fixture state");
+        let token = crate::update_handoff::token()?;
+        if fail_metadata {
+            platform::test_fail_registration_once();
+            let error = begin_update(&root, setup, VERSION, &token).err().context("Controlled metadata failure did not occur")?;
+            ensure!(format!("{error:#}").contains("Controlled isolated-test metadata failure"), "Unexpected update error: {error:#}");
+            ensure!(tree(&root, &root)? == before, "Rollback changed owned files, Data or unrelated bytes");
+            ensure!(platform::test_native_registry_record()? == registry_before, "Rollback changed native registry types/bytes");
+        } else {
+            let transaction = begin_update(&root, setup, VERSION, &token)?;
+            ensure!(transaction.previous_version == "1.0.3", "Transaction previous version differs");
+            let stage = transaction.stage.clone();
+            ensure!(stage == root.join(format!(".maxi-update-{token}")) && stage.is_dir(), "Transaction backup stage differs from the owned token path");
+            let stage_files = tree(&stage, &stage)?;
+            ensure!(stage_files.len() == FILES.len() + 2, "Unexpected transaction backup stage member");
+            for name in FILES.into_iter().chain([MARKER]) {
+                ensure!(stage_files.get(Path::new(&format!("old-{name}"))) == before.get(Path::new(name)), "Transaction backup differs: {name}");
+            }
+            let staged_record: serde_json::Value = crate::update_handoff::read_json(&stage.join("transaction.json"))?;
+            ensure!(staged_record["token"] == token && staged_record["state"] == "staging", "Transaction stage record differs");
+            let upgraded = fs::read(root.join("MaxiSoundSet.exe"))?;
+            ensure!(crate::update_handoff::payload_version(&upgraded)? == "1.0.4" && upgraded == APP, "New app version or embedded bytes differ");
+            let (_, updated) = crate::update_handoff::validate_target(&root, &root.join("MaxiSoundSet.exe"))?;
+            ensure!(updated.version == VERSION && updated.sha256 == format!("{:x}",Sha256::digest(APP)), "Updated manifest differs");
+            for (name, bytes) in payload() { ensure!(fs::read(root.join(name))? == bytes, "Updated payload differs: {name}"); }
+            ensure!(fs::read(root.join("Uninstall.exe"))? == fs::read(setup)?, "Updated uninstaller differs from built test executable");
+            // Live transaction backups are intentionally present here. Exclude only
+            // this verified stage; every other file remains in the preservation check.
+            let mut live_files = tree(&root, &root)?;
+            let relative_stage = stage.strip_prefix(&root)?;
+            live_files.retain(|path, _| !path.starts_with(relative_stage));
+            ensure!(preserved(&live_files) == preserved(&before), "Upgrade changed Data, hotkeys or unrelated bytes");
+            let registry_after = platform::test_native_registry_record()?;
+            ensure!(stable_registry(&registry_after) == stable_registry(&registry_before), "Upgrade changed unrelated registry/startup types or bytes");
+            ensure!(platform::text(platform::UNINSTALL_KEY, "DisplayVersion")?.as_deref() == Some(VERSION), "Native upgrade metadata version differs");
+            let expected_size = ((APP.len() as u64 + fs::metadata(setup)?.len()) / 1024).min(u32::MAX as u64) as u32;
+            let size = registry_after["values"].as_array().unwrap().iter().find(|value|value["name"] == "EstimatedSize").context("Missing native EstimatedSize")?;
+            ensure!(size["value"]["kind"] == 4 && size["value"]["bytes"] == serde_json::json!(expected_size.to_le_bytes()), "Native size metadata differs");
+            transaction.commit()?;
+            ensure!(!stage.exists(), "Committed backup stage remains");
+            let committed_app = fs::read(root.join("MaxiSoundSet.exe"))?;
+            ensure!(committed_app == APP && crate::update_handoff::payload_version(&committed_app)? == "1.0.4", "Committed app hash/version differs");
+            ensure!(preserved(&tree(&root, &root)?) == preserved(&before), "Commit changed Data, hotkeys or unrelated bytes");
+        }
+        no_stage(&root)?;
+        ensure!(platform::text(platform::RUN_KEY, "MaxiSoundSet")?.as_deref() == Some(startup.as_str()), "Startup string changed");
+        for (path, bytes) in &link_bytes { ensure!(&fs::read(path)? == bytes, "Native Shell Link bytes changed"); }
+        let after = tree(&root, &root)?;
+        let record = serde_json::json!({"case":if fail_metadata {"controlled-metadata-failure-rollback"} else {"commit"},
+            "root":root,"status":"passed","old_app_sha256":OLD_SHA256,"new_app_sha256":format!("{:x}",Sha256::digest(APP)),
+            "before_files":hashes(&before),"after_files":hashes(&after),"registry_before":registry_before,
+            "registry_after":platform::test_native_registry_record()?,"stage_removed":true,"app_or_helper_launched":false,
+            "native_shell_links":link_bytes.iter().map(|(path,bytes)|serde_json::json!({"path":path,"bytes":bytes,"sha256":format!("{:x}",Sha256::digest(bytes))})).collect::<Vec<_>>()});
+        fs::write(directory.join("evidence.json"), serde_json::to_vec_pretty(&record)?)?;
+        Ok(record)
+    }
+
+    /// Explicitly opt in with both environment variables. This verifies the native
+    /// transaction only; it deliberately never invokes helper handoff/app health.
+    #[test]
+    #[ignore = "requires workspace MAXI_NATIVE_UPGRADE_DIR and authentic MAXI_OLD_APP_PATH; writes private HKCU/Shell Link fixtures"]
+    fn native_103_to_104_transaction_preserves_data_and_rolls_back() -> Result<()> {
+        ensure!(VERSION == "1.0.4", "This bounded acceptance test is for 1.0.3 to 1.0.4 only");
+        let workspace = local_canonical(Path::new(env!("CARGO_MANIFEST_DIR")).parent().and_then(Path::parent).context("Missing workspace root")?)?;
+        let requested = PathBuf::from(std::env::var_os("MAXI_NATIVE_UPGRADE_DIR").context("Set MAXI_NATIVE_UPGRADE_DIR to an existing workspace evidence directory")?);
+        safe_root(&requested)?;
+        let evidence = local_canonical(&requested)?;
+        ensure!(evidence.is_dir() && evidence.starts_with(&workspace) && evidence != workspace, "Evidence directory must be strictly within this workspace");
+        let old_path = PathBuf::from(std::env::var_os("MAXI_OLD_APP_PATH").context("Set MAXI_OLD_APP_PATH to the archived 1.0.3 application")?);
+        let old_path = crate::update_handoff::canonical(&old_path)?;
+        ensure!(platform::same(&old_path, &workspace.join("releases/v1.0.3/MAXI-SOUNDSET-v1.0.3.exe")), "Old payload must be the workspace's archived 1.0.3 app");
+        let old = fs::read(&old_path)?;
+        ensure!(format!("{:x}",Sha256::digest(&old)) == OLD_SHA256 && crate::update_handoff::payload_version(&old)? == "1.0.3", "Old payload differs from archived SHA256SUMS or PE 1.0.3");
+        let setup = crate::update_handoff::canonical(&std::env::current_exe()?)?;
+        let setup_bytes = fs::read(&setup)?;
+        ensure!(setup_bytes.starts_with(b"MZ"), "Source setup is not the built native test executable");
+        let run = evidence.join(format!("native-upgrade-{}", nonce()));
+        fs::create_dir(&run)?;
+        no_links(&run)?;
+        let mut cases = Vec::new();
+        let result = (|| -> Result<()> {
+            for (name, fail) in [("commit", false), ("rollback", true)] { cases.push(run_case(&run.join(name), &old, &setup, fail)?); }
+            ensure!(fs::read(&old_path)? == old, "Archived old payload changed");
+            Ok(())
+        })();
+        let report = serde_json::json!({"status":if result.is_ok(){"passed"}else{"failed"},"error":result.as_ref().err().map(|error|format!("{error:#}")),
+            "scope":"Native in-process preflight/file transaction/HKCU/Shell Link preservation; no app launch, handoff or health check", "old_source":old_path,
+            "source_test_executable":setup,"source_test_sha256":format!("{:x}",Sha256::digest(&setup_bytes)),"cases":cases});
+        fs::write(run.join("report.json"), serde_json::to_vec_pretty(&report)?)?;
+        eprintln!("Native upgrade evidence: {}", run.join("report.json").display());
+        result
     }
 }
 

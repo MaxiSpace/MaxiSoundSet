@@ -147,6 +147,559 @@ mod tests {
     }
 
     #[test]
+    fn device_refresh_help_geometry_keyboard_and_render() {
+        use slint::platform::{Key, WindowEvent};
+        // Each draw allocates a fresh pixel buffer, so partial rendering may
+        // not assume that the previous frame is still present in that buffer.
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        let clock = Rc::new(Cell::new(Duration::ZERO));
+        slint::platform::set_platform(Box::new(Headless(adapter.clone(), clock.clone()))).unwrap();
+        let ui = crate::AppWindow::new().unwrap();
+        install_focus_reveal(&ui);
+        ui.set_app_version(env!("CARGO_PKG_VERSION").into());
+        ui.set_devices_ready(true);
+        ui.set_recovery_ready(true);
+        let refreshes = Rc::new(Cell::new(0));
+        let calls = refreshes.clone();
+        ui.on_refresh_devices(move || calls.set(calls.get() + 1));
+        let draw = |milliseconds: u64| {
+            clock.set(clock.get() + Duration::from_millis(milliseconds));
+            slint::platform::update_timers_and_animations();
+            full_redraw(ui.window());
+            let size = ui.window().size();
+            let mut pixels = vec![slint::Rgb8Pixel::default(); (size.width * size.height) as usize];
+            assert!(adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, size.width as usize); }));
+            (size, pixels)
+        };
+        let capture = |label: &str| {
+            if let Some(directory) = std::env::var_os("MAXI_DEVICE_RECONNECT_DIR") {
+                let directory = std::path::PathBuf::from(directory);
+                std::fs::create_dir_all(&directory).unwrap();
+                let (size, pixels) = draw(0);
+                let mut encoder = png::Encoder::new(std::fs::File::create(directory.join(format!("{label}.png"))).unwrap(), size.width, size.height);
+                encoder.set_color(png::ColorType::Rgb);
+                encoder.set_depth(png::BitDepth::Eight);
+                encoder.write_header().unwrap().write_image_data(&pixels.iter().flat_map(|pixel| [pixel.r, pixel.g, pixel.b]).collect::<Vec<_>>()).unwrap();
+            }
+        };
+        let mut cases = 0;
+        for scale in [1., 1.25, 1.5, 2.] {
+            ui.window().dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
+            for (width, height) in [(1280., 860.), (640., 320.)] {
+                adapter.set_size(slint::LogicalSize::new(width, height));
+                for english in [false, true] {
+                    ui.set_english(english);
+                    ui.set_sidebar_expanded(true);
+                    for mode in [0, 1] {
+                        ui.set_page(0);
+                        ui.set_mode(mode);
+                        ui.set_sidebar_expanded(true);
+                        ui.invoke_close_sidebar_menu();
+                        ui.show().unwrap();
+                        draw(350);
+                        let trigger = ui.get_device_help_trigger_bounds();
+                        let refresh = ui.get_device_refresh_button_bounds();
+                        assert!((trigger.width - 18.).abs() < 0.1 && (trigger.height - 18.).abs() < 0.1);
+                        assert!(trigger.y + trigger.height <= refresh.y - 2.9, "Help hit target overlaps Refresh: {trigger:?} / {refresh:?}");
+                        click(&ui, trigger);
+                        draw(250);
+                        assert!(ui.get_device_help_open(), "Refresh help did not open, scale={scale} size={width}x{height} en={english} mode={mode}");
+                        let panel = ui.get_device_help_bounds();
+                        assert!(panel.x >= 7.9 && panel.y >= 7.9 && panel.x + panel.width <= width + 0.1 - 8. && panel.y + panel.height <= height + 0.1 - 8., "Help clipped: {panel:?}, {width}x{height}, scale={scale}");
+                        assert!(ui.get_device_help_close_focused());
+                        for key in [Key::Tab, Key::Backtab] {
+                            press(&ui, key);
+                            assert!(ui.get_device_help_open() && ui.get_device_help_close_focused(), "Tab escaped an open help popup");
+                        }
+                        ui.window().dispatch_event(WindowEvent::KeyPressed { text: Key::Shift.into() });
+                        press(&ui, Key::Tab);
+                        ui.window().dispatch_event(WindowEvent::KeyReleased { text: Key::Shift.into() });
+                        assert!(ui.get_device_help_open() && ui.get_device_help_close_focused());
+                        if scale == 1. || scale == 1.5 {
+                            capture(&format!("Help-{scale}-{width}-{}-{mode}-top", if english { "EN" } else { "FA" }));
+                        }
+                        press(&ui, Key::End);
+                        draw(50);
+                        let range = ui.get_device_help_scroll_range();
+                        if mode == 1 { assert!(range > 1., "Full-mode help must scroll rather than clip its long instructions"); }
+                        assert!((ui.get_device_help_scroll_offset() + range).abs() < 0.2, "End did not expose the final help text");
+                        if scale == 1. || scale == 1.5 {
+                            capture(&format!("Help-{scale}-{width}-{}-{mode}-bottom", if english { "EN" } else { "FA" }));
+                        }
+                        press(&ui, Key::Home);
+                        assert!(ui.get_device_help_scroll_offset().abs() < 0.2);
+                        press(&ui, Key::Escape);
+                        assert!(!ui.get_device_help_open() && ui.get_device_help_trigger_focused());
+                        press(&ui, Key::Return);
+                        assert!(ui.get_device_help_open() && ui.get_device_help_close_focused());
+                        press(&ui, Key::Return);
+                        assert!(!ui.get_device_help_open() && ui.get_device_help_trigger_focused());
+                        ui.invoke_preview_device_help();
+                        draw(50);
+                        click(&ui, ui.get_device_help_close_bounds());
+                        assert!(!ui.get_device_help_open() && ui.get_device_help_trigger_focused());
+                        ui.invoke_preview_device_help();
+                        draw(50);
+                        let panel = ui.get_device_help_bounds();
+                        let sidebar = ui.invoke_sidebar_control_bounds(0);
+                        let (x, y) = (sidebar.x + sidebar.width / 2., sidebar.y + sidebar.height / 2.);
+                        let target_is_outside = x < panel.x || x >= panel.x + panel.width || y < panel.y || y >= panel.y + panel.height;
+                        let expanded_before = ui.get_sidebar_expanded();
+                        let menu_before = ui.get_sidebar_menu_open();
+                        // A clamped popup can cover the sidebar control at the
+                        // minimum viewport. In that case click clear client padding.
+                        click(&ui, if target_is_outside { sidebar } else { crate::ControlBounds { x: 0., y: 0., width: 4., height: 4. } });
+                        draw(50);
+                        assert!(!ui.get_device_help_open(), "Outside click did not dismiss help");
+                        if target_is_outside && (ui.get_sidebar_expanded() != expanded_before || ui.get_sidebar_menu_open() != menu_before) {
+                            assert!(!ui.get_device_help_trigger_focused(), "Outside dismissal stole focus from the clicked control");
+                        }
+                        ui.invoke_close_sidebar_menu();
+                        cases += 1;
+                    }
+                }
+            }
+        }
+        ui.window().dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: 1. });
+        adapter.set_size(slint::LogicalSize::new(1280., 860.));
+        ui.set_page(0);
+        draw(300);
+        for (running, paused, busy, components, scan, allowed) in [
+            (true, false, false, false, 0, false),
+            (true, true, false, false, 0, false),
+            (false, false, true, false, 0, false),
+            (false, false, false, true, 0, false),
+            (false, false, false, false, 1, false),
+            (false, false, false, false, 3, true),
+        ] {
+            ui.set_running(running); ui.set_paused(paused); ui.set_busy(busy); ui.set_components_busy(components); ui.set_device_refresh_state(scan);
+            ui.set_devices_ready(false); // Failed scans must leave Refresh available for retry.
+            draw(250);
+            let before = refreshes.get();
+            click(&ui, ui.get_device_refresh_button_bounds());
+            assert_eq!(refreshes.get(), before + i32::from(allowed), "Incorrect Refresh eligibility");
+            click(&ui, ui.get_device_help_trigger_bounds());
+            assert!(ui.get_device_help_open(), "Disabled Refresh made help inaccessible");
+            press(&ui, Key::Escape);
+        }
+        ui.set_running(false); ui.set_paused(false); ui.set_busy(false); ui.set_components_busy(false); ui.set_device_refresh_state(0);
+        for english in [false, true] {
+            ui.set_english(english); ui.set_sidebar_expanded(true); ui.set_page(0); draw(350);
+            capture(if english { "Sidebar-EN" } else { "Sidebar-FA" });
+            ui.invoke_preview_routing_help(); draw(250);
+            assert!(ui.get_routing_help_open());
+            capture(if english { "Routing-help-EN" } else { "Routing-help-FA" });
+            press(&ui, Key::Escape);
+            assert!(!ui.get_routing_help_open(), "Escape no longer closes compact routing help");
+            ui.invoke_preview_routing_help(); draw(50);
+            press(&ui, Key::Return);
+            assert!(!ui.get_routing_help_open(), "Return no longer closes compact routing help");
+            ui.set_page(6); draw(350);
+            assert!(ui.get_about_layout_fits());
+            capture(if english { "About-EN" } else { "About-FA" });
+        }
+        ui.hide().unwrap();
+        eprintln!("PASS: {cases} help language/mode/viewport/scale cases; synthetic pointer/keyboard and refresh eligibility; About/sidebar/routing captures");
+    }
+
+    #[test]
+    fn virtual_input_help_geometry_keyboard_and_render() {
+        use slint::{Model, platform::{Key, WindowEvent}};
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        let clock = Rc::new(Cell::new(Duration::ZERO));
+        slint::platform::set_platform(Box::new(Headless(adapter.clone(), clock.clone()))).unwrap();
+        let ui = crate::AppWindow::new().unwrap();
+        install_focus_reveal(&ui);
+        crate::set_eq_model(&ui, [0.; 10]);
+        ui.set_devices_ready(true);
+        ui.set_recovery_ready(true);
+        let sources = Rc::new(slint::VecModel::from(vec![
+            slint::SharedString::from("CABLE Input"), "CABLE In 16ch".into(), "Another input".into(),
+        ]));
+        let outputs = Rc::new(slint::VecModel::from(vec![slint::SharedString::from("System default"), "Headphones".into()]));
+        ui.set_sources(sources.clone().into());
+        ui.set_outputs(outputs.clone().into());
+        ui.set_source_index(1);
+        ui.set_output_index(1);
+        let calls = Rc::new(Cell::new(0));
+        for callback in [0, 1, 2, 3] {
+            let observed = calls.clone();
+            match callback {
+                0 => ui.on_config_changed(move || observed.set(observed.get() + 1)),
+                1 => ui.on_refresh_devices(move || observed.set(observed.get() + 1)),
+                2 => ui.on_toggle_audio(move || observed.set(observed.get() + 1)),
+                _ => ui.on_toggle_pause(move || observed.set(observed.get() + 1)),
+            }
+        }
+        let draw = |milliseconds: u64, label: Option<String>| {
+            clock.set(clock.get() + Duration::from_millis(milliseconds));
+            slint::platform::update_timers_and_animations();
+            full_redraw(ui.window());
+            let size = ui.window().size();
+            let mut pixels = vec![slint::Rgb8Pixel::default(); (size.width * size.height) as usize];
+            assert!(adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, size.width as usize); }));
+            if let (Some(directory), Some(label)) = (std::env::var_os("MAXI_VIRTUAL_INPUT_HELP_DIR"), label) {
+                let directory = std::path::PathBuf::from(directory);
+                std::fs::create_dir_all(&directory).unwrap();
+                let mut encoder = png::Encoder::new(std::fs::File::create(directory.join(format!("{label}.png"))).unwrap(), size.width, size.height);
+                encoder.set_color(png::ColorType::Rgb);
+                encoder.set_depth(png::BitDepth::Eight);
+                encoder.write_header().unwrap().write_image_data(&pixels.iter().flat_map(|p| [p.r, p.g, p.b]).collect::<Vec<_>>()).unwrap();
+            }
+        };
+        let same_bounds = |a: crate::ControlBounds, b: crate::ControlBounds| {
+            assert!((a.x-b.x).abs() < 0.2 && (a.y-b.y).abs() < 0.2 && (a.width-b.width).abs() < 0.2 && (a.height-b.height).abs() < 0.2,
+                "Help changed field geometry: {a:?} / {b:?}");
+        };
+        let mut cases = 0;
+        for scale in [1., 1.5] {
+            ui.window().dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
+            for (width, height) in [(640., 860.), (1100., 860.), (1160., 860.), (1280., 860.), (640., 320.)] {
+                adapter.set_size(slint::LogicalSize::new(width, height));
+                for english in [false, true] {
+                    ui.set_english(english);
+                    ui.set_sidebar_expanded(true);
+                    ui.invoke_close_sidebar_menu();
+                    ui.set_page(0);
+                    ui.set_mode(1);
+                    ui.show().unwrap();
+                    draw(500, None);
+                    let prefix = format!("Virtual-input-{scale}-{width}x{height}-{}", if english { "EN" } else { "FA" });
+                    let source = ui.get_source_combo_bounds();
+                    let output = ui.get_output_combo_bounds();
+                    let strip = ui.get_sound_control_strip_bounds();
+                    let title = ui.get_virtual_input_title_bounds();
+                    let trigger = ui.get_virtual_input_help_trigger_bounds();
+                    draw(0, Some(format!("{prefix}-closed")));
+                    eprintln!("{prefix}: source={source:?}; output={output:?}; title={title:?}; trigger={trigger:?}; strip={strip:?}");
+                    assert!(ui.get_virtual_input_help_visible());
+                    assert!((source.height - 36.).abs() < 0.2, "Unexpected source ComboBox height: {source:?}");
+                    assert!((strip.height - if width == 640. { 142. } else { 82. }).abs() < 0.2);
+                    assert!((trigger.width - 18.).abs() < 0.2 && (trigger.height - 18.).abs() < 0.2);
+                    assert!(trigger.x >= source.x - 0.2 && trigger.x + trigger.width <= source.x + source.width + 0.2);
+                    assert!(if english { title.x + title.width <= trigger.x - 5.9 } else { trigger.x + trigger.width <= title.x - 5.9 }, "Title overlaps trigger: {title:?} / {trigger:?}");
+                    assert!(trigger.y + trigger.height <= source.y - 2., "Help overlaps the actual ComboBox");
+                    // Capture the closed control before opening: all later states
+                    // must retain these exact actual field bounds.
+                    ui.window().dispatch_event(WindowEvent::PointerMoved { position: slint::LogicalPosition::new(trigger.x + 9., trigger.y + 9.) });
+                    draw(150, None);
+                    assert!(!ui.get_virtual_input_help_open(), "Hover opened help");
+                    // Reach the real trigger through Tab navigation, including
+                    // after a previous viewport recreated the Full-mode field.
+                    for _ in 0..100 {
+                        if ui.get_virtual_input_help_trigger_focused() { break; }
+                        press(&ui, Key::Tab);
+                    }
+                    draw(0, None);
+                    assert!(ui.get_virtual_input_help_trigger_focused() && !ui.get_virtual_input_help_open(), "Trigger unreachable by Tab or focus opened help");
+                    press(&ui, Key::Tab);
+                    assert!(!ui.get_virtual_input_help_open(), "Tab navigation opened help");
+                    click(&ui, trigger);
+                    draw(250, Some(format!("{prefix}-top")));
+                    assert!(ui.get_virtual_input_help_open() && ui.get_virtual_input_help_close_focused());
+                    let panel = ui.get_virtual_input_help_bounds();
+                    assert!(panel.x >= 7.9 && panel.y >= 7.9 && panel.x + panel.width <= width - 7.9 && panel.y + panel.height <= height - 7.9,
+                        "Help clipped: {panel:?}, {prefix}");
+                    same_bounds(source.clone(), ui.get_source_combo_bounds());
+                    same_bounds(output.clone(), ui.get_output_combo_bounds());
+                    same_bounds(strip.clone(), ui.get_sound_control_strip_bounds());
+                    for key in [Key::Tab, Key::Backtab] {
+                        press(&ui, key);
+                        assert!(ui.get_virtual_input_help_open() && ui.get_virtual_input_help_close_focused());
+                    }
+                    press(&ui, Key::End);
+                    let range = ui.get_virtual_input_help_scroll_range();
+                    draw(50, if range > 0.2 { Some(format!("{prefix}-bottom")) } else { None });
+                    assert!((ui.get_virtual_input_help_scroll_offset() + range).abs() < 0.2);
+                    press(&ui, Key::Home);
+                    assert!(ui.get_virtual_input_help_scroll_offset().abs() < 0.2);
+                    press(&ui, Key::Escape);
+                    assert!(!ui.get_virtual_input_help_open() && ui.get_virtual_input_help_trigger_focused());
+                    press(&ui, Key::Return);
+                    assert!(ui.get_virtual_input_help_open() && ui.get_virtual_input_help_close_focused());
+                    press(&ui, " ");
+                    assert!(!ui.get_virtual_input_help_open() && ui.get_virtual_input_help_trigger_focused());
+                    press(&ui, " ");
+                    assert!(ui.get_virtual_input_help_open());
+                    click(&ui, ui.get_virtual_input_help_close_bounds());
+                    assert!(!ui.get_virtual_input_help_open() && ui.get_virtual_input_help_trigger_focused());
+                    press(&ui, Key::Return);
+                    // The sidebar toggle is an actual focusable outside target.
+                    let sidebar = ui.invoke_sidebar_control_bounds(0);
+                    let cx = sidebar.x + sidebar.width / 2.;
+                    let cy = sidebar.y + sidebar.height / 2.;
+                    let sidebar_outside = cx < panel.x || cx >= panel.x + panel.width || cy < panel.y || cy >= panel.y + panel.height;
+                    let expanded_before = ui.get_sidebar_expanded();
+                    let menu_before = ui.get_sidebar_menu_open();
+                    // At minimum height the clamped popup can cover the toggle;
+                    // clear client padding remains outside its eight-pixel margin.
+                    click(&ui, if sidebar_outside { sidebar } else { crate::ControlBounds { x: 0., y: 0., width: 4., height: 4. } });
+                    draw(500, None);
+                    assert!(!ui.get_virtual_input_help_open());
+                    if sidebar_outside && (ui.get_sidebar_expanded() != expanded_before || ui.get_sidebar_menu_open() != menu_before) {
+                        assert!(!ui.get_virtual_input_help_trigger_focused(), "Outside dismissal stole the activated control's focus");
+                        assert_eq!(ui.get_sidebar_focus_index(), 0, "Activated sidebar toggle lost focus");
+                    }
+                    ui.invoke_close_sidebar_menu();
+                    ui.set_sidebar_expanded(true);
+                    draw(500, None);
+                    for lifecycle in 0..3 {
+                        click(&ui, ui.get_virtual_input_help_trigger_bounds());
+                        assert!(ui.get_virtual_input_help_open());
+                        match lifecycle {
+                            0 => ui.set_mode(0),
+                            1 => ui.set_page(1),
+                            _ => ui.set_sidebar_expanded(false),
+                        }
+                        let capture_lifecycle = scale == 1. && width == 1280. && height == 860. && lifecycle < 2;
+                        draw(500, if capture_lifecycle { Some(format!("{prefix}-lifecycle{lifecycle}-hidden")) } else { None });
+                        assert!(!ui.get_virtual_input_help_open(), "Orphaned popup after lifecycle {lifecycle}");
+                        if lifecycle == 0 { assert!(!ui.get_virtual_input_help_visible(), "Windows-volume mode exposes input help"); }
+                        ui.set_mode(1); ui.set_page(0); ui.set_sidebar_expanded(true);
+                        draw(500, if capture_lifecycle { Some(format!("{prefix}-lifecycle{lifecycle}-restored")) } else { None });
+                        assert!(!ui.get_virtual_input_help_open(), "Restoring the field resurrected popup after lifecycle {lifecycle}");
+                    }
+                    same_bounds(source, ui.get_source_combo_bounds());
+                    same_bounds(output, ui.get_output_combo_bounds());
+                    assert_eq!((ui.get_source_index(), ui.get_output_index()), (1, 1));
+                    assert_eq!(ui.get_sources().iter().collect::<Vec<_>>(), sources.iter().collect::<Vec<_>>());
+                    assert_eq!(ui.get_outputs().iter().collect::<Vec<_>>(), outputs.iter().collect::<Vec<_>>());
+                    assert_eq!(calls.get(), 0, "Help invoked configuration, refresh, or audio callbacks");
+                    cases += 1;
+                }
+            }
+        }
+        ui.hide().unwrap();
+        eprintln!("PASS: {cases} virtual-input help FA/EN viewport/DPI cases; synthetic click, hover, focus, keyboard, lifecycle, geometry, models and callback isolation; software-rendered closed/top/scroll-end evidence");
+    }
+
+    #[test]
+    fn automatic_routing_help_fits_and_keeps_keyboard_focus_bilingual() {
+        use slint::platform::{Key, WindowEvent};
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        let clock = Rc::new(Cell::new(Duration::ZERO));
+        slint::platform::set_platform(Box::new(Headless(adapter.clone(), clock.clone()))).unwrap();
+        let ui = crate::AppWindow::new().unwrap();
+        install_focus_reveal(&ui);
+        ui.set_devices_ready(true);
+        ui.set_recovery_ready(true);
+        let draw = |elapsed: u64, label: Option<String>| {
+            clock.set(clock.get() + Duration::from_millis(elapsed));
+            slint::platform::update_timers_and_animations();
+            full_redraw(ui.window());
+            let size = ui.window().size();
+            let mut pixels = vec![slint::Rgb8Pixel::default(); (size.width * size.height) as usize];
+            assert!(adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, size.width as usize); }));
+            if let (Some(directory), Some(label)) = (std::env::var_os("MAXI_ROUTE_CAPTURE_DIR"), label) {
+                let directory = std::path::PathBuf::from(directory);
+                std::fs::create_dir_all(&directory).unwrap();
+                let mut encoder = png::Encoder::new(std::fs::File::create(directory.join(format!("{label}.png"))).unwrap(), size.width, size.height);
+                encoder.set_color(png::ColorType::Rgb);
+                encoder.set_depth(png::BitDepth::Eight);
+                encoder.write_header().unwrap().write_image_data(&pixels.iter().flat_map(|p| [p.r, p.g, p.b]).collect::<Vec<_>>()).unwrap();
+            }
+        };
+        let press = |key: Key| {
+            let text = slint::SharedString::from(key);
+            ui.window().dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+            ui.window().dispatch_event(WindowEvent::KeyReleased { text });
+        };
+        let mut cases = 0;
+        for scale in [1., 1.5] {
+            ui.window().dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
+            for (width, height) in [(1280., 860.), (640., 320.)] {
+                adapter.set_size(slint::LogicalSize::new(width, height));
+                for english in [false, true] {
+                    ui.set_english(english);
+                    for mode in [0, 1] {
+                        ui.set_mode(mode);
+                        ui.set_page(0);
+                        ui.show().unwrap();
+                        draw(350, None);
+                        ui.invoke_preview_routing_help();
+                        let prefix = format!("Routing-{scale}-{width}-{}-{mode}", if english { "EN" } else { "FA" });
+                        draw(250, Some(format!("{prefix}-top")));
+                        assert!(ui.get_routing_help_open() && ui.get_routing_help_close_focused());
+                        let bounds = ui.get_routing_help_bounds();
+                        assert!(bounds.x >= 7.9 && bounds.y >= 7.9
+                            && bounds.x + bounds.width <= width - 7.9
+                            && bounds.y + bounds.height <= height - 7.9,
+                            "Routing help clipped at {width}x{height}, scale={scale}, en={english}, mode={mode}: {bounds:?}");
+                        let close = ui.get_routing_help_close_bounds();
+                        assert!(close.x >= bounds.x && close.y >= bounds.y
+                            && close.x + close.width <= bounds.x + bounds.width
+                            && close.y + close.height <= bounds.y + bounds.height);
+                        for key in [Key::Tab, Key::Backtab] {
+                            press(key);
+                            assert!(ui.get_routing_help_open() && ui.get_routing_help_close_focused(), "Tab escaped routing help");
+                        }
+                        press(Key::End);
+                        draw(50, Some(format!("{prefix}-bottom")));
+                        assert!((ui.get_routing_help_scroll_offset() + ui.get_routing_help_scroll_range()).abs() < 0.2,
+                            "End did not expose the final routing instructions");
+                        press(Key::Home);
+                        assert!(ui.get_routing_help_scroll_offset().abs() < 0.2);
+                        press(Key::Escape);
+                        assert!(!ui.get_routing_help_open() && ui.get_routing_help_trigger_focused());
+                        press(Key::Return);
+                        assert!(ui.get_routing_help_open() && ui.get_routing_help_close_focused());
+                        press(Key::Return);
+                        assert!(!ui.get_routing_help_open() && ui.get_routing_help_trigger_focused());
+                        cases += 1;
+                    }
+                }
+            }
+        }
+        ui.hide().unwrap();
+        eprintln!("PASS: {cases} automatic-routing help cases, FA/EN, both modes, normal/minimum viewport, 100/150% scale; rendered top/end, bounds, close target, keyboard scrolling and focus return; synthetic input and clock");
+    }
+
+    #[test]
+    fn device_refresh_feedback_preserves_audio_errors_and_notice_lifetimes() {
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        let clock = Rc::new(Cell::new(Duration::ZERO));
+        slint::platform::set_platform(Box::new(Headless(adapter.clone(), clock.clone()))).unwrap();
+        let ui = crate::AppWindow::new().unwrap();
+        adapter.set_size(slint::LogicalSize::new(1280., 860.));
+        ui.show().unwrap();
+        let flush = || {
+            slint::platform::update_timers_and_animations();
+            full_redraw(ui.window());
+            let size = ui.window().size();
+            let mut pixels = vec![slint::Rgb8Pixel::default(); (size.width * size.height) as usize];
+            adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, size.width as usize); });
+        };
+        let advance = |milliseconds| {
+            // Arm change-triggered timers at the current fake time before
+            // jumping ahead; a real event loop renders between those events.
+            flush();
+            clock.set(clock.get() + Duration::from_millis(milliseconds));
+            flush();
+            let _ = ui.get_notice_display_text();
+        };
+        for english in [false, true] {
+            ui.set_english(english); ui.set_mode(1); ui.set_device_refresh_state(0);
+            ui.set_audio_error("".into()); ui.set_volume_notice("".into());
+            ui.set_device_refresh_state(1); advance(250);
+            assert!(ui.get_notice_reveal() > 0.99);
+            ui.invoke_dismiss_notice(); advance(250);
+            assert_eq!(ui.get_device_refresh_state(), 1, "Dismissal canceled the backend scan");
+            assert!(ui.get_notice_reveal() < 0.01);
+            ui.set_output_unavailable(true); ui.set_device_refresh_state(2); advance(250);
+            assert!(ui.get_notice_reveal() > 0.99);
+            assert!(ui.get_notice_display_text().contains(if english { "available" } else { "در دسترس" }));
+            advance(3200); advance(250);
+            assert!(ui.get_notice_reveal() < 0.01, "Refresh success did not expire");
+            ui.set_device_refresh_state(1); ui.set_device_refresh_state(2); advance(250);
+            ui.invoke_show_volume_notice("Audio started".into()); advance(250);
+            assert_eq!(ui.get_notice_display_text(), "Audio started", "An old refresh success masked the latest user action");
+            ui.set_device_refresh_state(3); advance(3500);
+            assert!(ui.get_notice_reveal() > 0.99, "Refresh failure expired before retry/dismissal");
+            ui.set_audio_error("Recovery must finish first".into()); advance(250);
+            assert_eq!(ui.get_notice_display_text(), "Recovery must finish first");
+            ui.set_device_refresh_state(1); ui.set_device_refresh_state(2); advance(3500);
+            assert_eq!(ui.get_audio_error(), "Recovery must finish first", "Refresh success erased an audio/recovery error");
+            ui.set_audio_error("".into()); advance(250);
+            assert!(ui.get_notice_reveal() < 0.01, "A hidden success was queued behind the audio error");
+            ui.set_output_unavailable(false); ui.set_device_refresh_state(1);
+            ui.invoke_show_volume_notice("Volume target ·50%".into());
+            advance(3500); ui.set_device_refresh_state(2); advance(3500); advance(250);
+            assert!(ui.get_volume_notice().is_empty() && ui.get_notice_reveal() < 0.01, "Masked volume messages must retain their original deadline");
+            // Preserve the pre-existing close behavior: dismissing an error
+            // must not immediately reveal a stale volume notice underneath it.
+            ui.set_device_refresh_state(0);
+            ui.invoke_show_volume_notice("Old volume message".into());
+            ui.set_audio_error("Current audio error".into()); advance(250);
+            ui.invoke_dismiss_notice(); advance(250);
+            assert!(ui.get_notice_reveal() < 0.01, "Dismissed audio error revealed a stale volume notice");
+        }
+        ui.hide().unwrap();
+    }
+
+    #[test]
+    fn device_invalidated_notice_fits_bilingual_dashboard_and_close_target() {
+        use slint::platform::WindowEvent;
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        let clock = Rc::new(Cell::new(Duration::ZERO));
+        slint::platform::set_platform(Box::new(Headless(adapter.clone(), clock.clone()))).unwrap();
+        let ui = crate::AppWindow::new().unwrap();
+        let draw = |milliseconds| {
+            slint::platform::update_timers_and_animations();
+            clock.set(clock.get() + Duration::from_millis(milliseconds));
+            slint::platform::update_timers_and_animations();
+            full_redraw(ui.window());
+            let size = ui.window().size();
+            let mut pixels = vec![slint::Rgb8Pixel::default(); (size.width * size.height) as usize];
+            assert!(adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, size.width as usize); }));
+            (size, pixels)
+        };
+        let mut cases = 0;
+        for scale in [1., 1.5] {
+            ui.window().dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
+            for (width, height) in [(1280., 860.), (640., 320.)] {
+                adapter.set_size(slint::LogicalSize::new(width, height));
+                for english in [false, true] {
+                    ui.set_english(english);
+                    ui.set_sidebar_expanded(true);
+                    ui.set_page(0);
+                    ui.set_audio_error(crate::device_invalidated_notice(english).into());
+                    ui.show().unwrap();
+                    draw(0);
+                    draw(350);
+                    let (size, pixels) = draw(50);
+                    let card = ui.get_notice_bounds();
+                    let close = ui.get_notice_close_bounds();
+                    let text = ui.get_notice_text_bounds();
+                    assert!(card.x >= 0. && card.y >= 0. && card.x + card.width <= width + 0.1 && card.y + card.height <= height + 0.1);
+                    assert!((card.y + card.height - (height - 23.)).abs() < 0.2);
+                    let sidebar = ui.get_sidebar_menu_width();
+                    let center = (width - sidebar) / 2. + if english { sidebar } else { 0. };
+                    assert!((card.x + card.width / 2. - center).abs() < 0.2);
+                    assert!((close.width - 36.).abs() < 0.1 && (close.height - 36.).abs() < 0.1);
+                    let (left, right) = if english { (card.x + 18., close.x - 11.) }
+                        else { (close.x + close.width + 11., card.x + card.width - 18.) };
+                    assert!(text.x >= left - 0.1 && text.x + text.width <= right + 0.1);
+                    assert!((text.x + text.width / 2. - (left + right) / 2.).abs() < 0.2);
+                    assert!(text.y >= card.y + 10.9 && text.y + text.height <= card.y + card.height - 10.9);
+                    assert_eq!(ui.get_notice_display_text(), crate::device_invalidated_notice(english));
+                    assert!(!ui.get_notice_display_text().contains("88890004"));
+                    // Inspect the actual peach error-text ink at physical DPI;
+                    // a correct Text rectangle alone would miss bad alignment.
+                    let mut ink: Option<(usize, usize)> = None;
+                    for y in (text.y * scale).ceil() as usize..((text.y + text.height) * scale).floor() as usize {
+                        for x in (left * scale).ceil() as usize..(right * scale).floor() as usize {
+                            let pixel = pixels[y * size.width as usize + x];
+                            if pixel.r > 235 && pixel.g > 160 && pixel.g < 215 && pixel.b > 120 && pixel.b < 190 {
+                                ink = Some(match ink { Some((a, b)) => (a.min(x), b.max(x)), None => (x, x) });
+                            }
+                        }
+                    }
+                    let (a, b) = ink.expect("Friendly device message must be painted");
+                    assert!(((a + b + 1) as f32 / (2. * scale) - (left + right) / 2.).abs() <= 3.5, "Friendly error ink is not centered");
+                    if let Some(directory) = std::env::var_os("MAXI_DEVICE_ERROR_CAPTURE_DIR") {
+                        let directory = std::path::PathBuf::from(directory);
+                        std::fs::create_dir_all(&directory).unwrap();
+                        let path = directory.join(format!("Device-error-{scale}-{width}-{}.png", if english { "EN" } else { "FA" }));
+                        let mut encoder = png::Encoder::new(std::fs::File::create(path).unwrap(), size.width, size.height);
+                        encoder.set_color(png::ColorType::Rgb);
+                        encoder.set_depth(png::BitDepth::Eight);
+                        encoder.write_header().unwrap().write_image_data(&pixels.iter().flat_map(|p| [p.r, p.g, p.b]).collect::<Vec<_>>()).unwrap();
+                    }
+                    draw(4000);
+                    assert_eq!(ui.get_notice_display_text(), crate::device_invalidated_notice(english));
+                    assert!(ui.get_notice_reveal() > 0.99, "Device error must keep the existing persistent-error lifetime");
+                    click(&ui, close);
+                    draw(250);
+                    assert!(ui.get_audio_error().is_empty() && ui.get_notice_reveal() < 0.01);
+                    cases += 1;
+                }
+            }
+        }
+        ui.hide().unwrap();
+        eprintln!("PASS: {cases} FA/EN friendly-error viewport/DPI renders, centered ink and close target; persistent-error lifetime retained");
+    }
+
+    #[test]
     fn outer_bounds_fit_work_area_and_negative_monitor_origins() {
         assert_eq!(bounded_rect([40, 40, 1320, 900], [0, 0, 1280, 680]), [0, 0, 1280, 680]);
         assert_eq!(bounded_rect([-2400, 50, -1300, 810], [-1920, 0, 0, 1040]), [-1920, 50, -820, 810]);
@@ -167,6 +720,162 @@ mod tests {
         ui.window().dispatch_event(slint::platform::WindowEvent::PointerMoved { position });
         ui.window().dispatch_event(slint::platform::WindowEvent::PointerPressed { position, button: slint::platform::PointerEventButton::Left });
         ui.window().dispatch_event(slint::platform::WindowEvent::PointerReleased { position, button: slint::platform::PointerEventButton::Left });
+    }
+
+    #[test]
+    fn compact_playback_label_render_geometry_and_selection() {
+        use slint::{Model, platform::{Key, WindowEvent}};
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        let clock = Rc::new(Cell::new(Duration::ZERO));
+        slint::platform::set_platform(Box::new(Headless(adapter.clone(), clock.clone()))).unwrap();
+        let ui = crate::AppWindow::new().unwrap();
+        ui.set_devices_ready(true);
+        ui.set_recovery_ready(true);
+        ui.set_mode(1);
+        // Match production initialization: an empty EQ model leaves only the
+        // fixed-width scale in its layout and can cap the entire graph column,
+        // even when the equalizer is hidden by the selected profile.
+        ui.set_eq_bands(Rc::new(slint::VecModel::from(["31", "62", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"].into_iter().map(|frequency| crate::EqBand { frequency: frequency.into(), gain: 0. }).collect::<Vec<_>>())).into());
+        ui.set_sources(Rc::new(slint::VecModel::from(vec!["CABLE Output".into()])).into());
+        let changes = Rc::new(Cell::new(0));
+        let observed = changes.clone();
+        ui.on_config_changed(move || observed.set(observed.get() + 1));
+        let draw = || {
+            clock.set(clock.get() + Duration::from_millis(500));
+            slint::platform::update_timers_and_animations();
+            full_redraw(ui.window());
+            let size = ui.window().size();
+            let mut pixels = vec![slint::Rgb8Pixel::default(); (size.width * size.height) as usize];
+            assert!(adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, size.width as usize); }));
+            (size, pixels)
+        };
+        let capture = |label: &str, size: slint::PhysicalSize, pixels: &[slint::Rgb8Pixel]| {
+            if let Some(folder) = std::env::var_os("MAXI_COMPACT_DEVICE_CAPTURE_DIR") {
+                let folder = std::path::PathBuf::from(folder);
+                std::fs::create_dir_all(&folder).unwrap();
+                let mut encoder = png::Encoder::new(std::fs::File::create(folder.join(format!("{label}.png"))).unwrap(), size.width, size.height);
+                encoder.set_color(png::ColorType::Rgb);
+                encoder.set_depth(png::BitDepth::Eight);
+                encoder.write_header().unwrap().write_image_data(&pixels.iter().flat_map(|p| [p.r, p.g, p.b]).collect::<Vec<_>>()).unwrap();
+            }
+        };
+        for scale in [1., 1.5] {
+            ui.window().dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
+            for english in [false, true] {
+                ui.set_english(english);
+                // Closed-label visuals must not impose a finite intrinsic maximum
+                // on other ComboBox callers and collapse the wide graph column.
+                adapter.set_size(slint::LogicalSize::new(1920., 1000.));
+                ui.show().unwrap();
+                for profile in [1, 7] {
+                    ui.set_profile(profile);
+                    let (size, pixels) = draw();
+                    let cards = ui.get_sound_cards_bounds();
+                    let strip = ui.get_sound_control_strip_bounds();
+                    let target = ui.get_sound_target_card_bounds();
+                    let graph = ui.get_sound_graph_column_bounds();
+                    let tuning = ui.get_sound_tuning_card_bounds();
+                    assert!(cards.width > 1500., "Wide fixture must have a wide body: {cards:?}");
+                    assert!((cards.x - strip.x).abs() < 1. && (cards.width - strip.width).abs() < 1., "Sound cards must fill the same body width as the header");
+                    assert!((graph.width + target.width + 16. - cards.width).abs() < 1., "Graph and controls must consume all available width: {graph:?} / {target:?} / {cards:?}");
+                    let left = graph.x.min(target.x);
+                    let right = (graph.x + graph.width).max(target.x + target.width);
+                    assert!((left - cards.x).abs() < 1. && (right - cards.x - cards.width).abs() < 1., "Wide sound cards leave blank body space, EN={english}, profile={profile}");
+                    assert!((tuning.x - graph.x).abs() < 1. && (tuning.width - graph.width).abs() < 1., "Tuning card must fill graph column");
+                    capture(&format!("{scale}-1920-{}-wide-profile{profile}", if english { "EN" } else { "FA" }), size, &pixels);
+                }
+                ui.set_profile(1);
+                let full = if english { "Unavailable · selected output" } else { "در دسترس نیست · خروجی انتخاب‌شده" };
+                let alternate = if english { "Unavailable · a different saved device" } else { "در دسترس نیست · دستگاه ذخیره‌شدهٔ دیگر" };
+                let labels = Rc::new(slint::VecModel::from(vec![slint::SharedString::from(full), "System default".into()]));
+                ui.set_outputs(labels.clone().into());
+                ui.set_output_index(0);
+                ui.set_output_unavailable(true);
+                // 1160 is the reported unstacked Full header; 1100 is its narrow boundary.
+                for width in [640., 1100., 1160., 1280., 1920.] {
+                    adapter.set_size(slint::LogicalSize::new(width, 860.));
+                    ui.show().unwrap();
+                    let (size, first) = draw();
+                    let combo = ui.get_output_combo_bounds();
+                    let text = ui.get_output_closed_text_bounds();
+                    let icon = ui.get_output_closed_icon_bounds();
+                    assert!(text.x >= combo.x + 11.9 && text.x + text.width <= combo.x + combo.width - 11.9, "Closed text escaped padding: {text:?} / {combo:?}");
+                    assert!(text.width <= combo.width - 46.9, "Text must reserve padding, gap and icon");
+                    assert!(if english { text.x + text.width <= icon.x - 7.9 } else { text.x >= icon.x + icon.width + 7.9 }, "Text overlaps icon, EN={english}");
+                    let narrow = combo.width < 240.;
+                    assert_eq!(ui.get_output_closed_label().as_str(), if narrow { if english { "Change output" } else { "تغییر خروجی" } } else { full });
+                    assert_eq!(ui.get_output_full_value().as_str(), full);
+                    assert_eq!(ui.get_outputs().row_data(0).unwrap().as_str(), full);
+                    assert_eq!(ui.get_output_index(), 0);
+                    assert_eq!(changes.get(), 0, "Responsive presentation must not select a device");
+                    capture(&format!("{scale}-{width}-{}-unavailable", if english { "EN" } else { "FA" }), size, &first);
+                    // Replacing only the full model text must have no visible effect in
+                    // compact unavailable mode, and cannot paint outside the text box wide.
+                    labels.set_row_data(0, alternate.into());
+                    let (_, second) = draw();
+                    let mut differences = 0;
+                    for (index, (a, b)) in first.iter().zip(&second).enumerate() {
+                        if a == b { continue; }
+                        differences += 1;
+                        let x = (index % size.width as usize) as f32 / scale;
+                        let y = (index / size.width as usize) as f32 / scale;
+                        assert!(!narrow && x >= text.x.floor() - 1. && x <= (text.x + text.width).ceil() + 1. && y >= text.y.floor() - 1. && y <= (text.y + text.height).ceil() + 1., "Model text spilled outside closed text rectangle, EN={english}, width={width}");
+                    }
+                    if narrow { assert_eq!(differences, 0); } else { assert!(differences > 0); }
+                    labels.set_row_data(0, full.into());
+                    // A long available name still uses its real value and elides in place.
+                    ui.set_output_unavailable(false);
+                    labels.set_row_data(0, "A very long USB playback device name / نام بسیار طولانی دستگاه صوتی / endpoint detail".into());
+                    let (size, pixels) = draw();
+                    assert_eq!(ui.get_output_closed_label(), ui.get_outputs().row_data(0).unwrap());
+                    assert_eq!(ui.get_output_full_value(), ui.get_outputs().row_data(0).unwrap());
+                    capture(&format!("{scale}-{width}-{}-long-name", if english { "EN" } else { "FA" }), size, &pixels);
+                    labels.set_row_data(0, "Different very long USB playback device / نام بسیار طولانی دیگر دستگاه صوتی / endpoint detail".into());
+                    let (_, other_name) = draw();
+                    let mut name_differences = 0;
+                    let text = ui.get_output_closed_text_bounds();
+                    for (index, (a, b)) in pixels.iter().zip(&other_name).enumerate() {
+                        if a == b { continue; }
+                        name_differences += 1;
+                        let x = (index % size.width as usize) as f32 / scale;
+                        let y = (index / size.width as usize) as f32 / scale;
+                        assert!(x >= text.x.floor() - 1. && x <= (text.x + text.width).ceil() + 1. && y >= text.y.floor() - 1. && y <= (text.y + text.height).ceil() + 1., "Long device name spilled outside text rectangle");
+                    }
+                    assert!(name_differences > 0, "Distinct long real names must remain visible");
+                    labels.set_row_data(0, full.into());
+                    ui.set_output_unavailable(true);
+                }
+                // Approach the display threshold from both sides using actual field
+                // geometry, independent of sidebar/stacked breakpoints.
+                for target in [239.5, 240.5] {
+                    let (mut low, mut high) = (1100., 2400.);
+                    for _ in 0..14 {
+                        let width = (low + high) / 2.;
+                        adapter.set_size(slint::LogicalSize::new(width, 860.));
+                        draw();
+                        if ui.get_output_combo_bounds().width < target { low = width; } else { high = width; }
+                    }
+                    let actual = ui.get_output_combo_bounds().width;
+                    assert!((actual - target).abs() < 0.4, "Did not reach threshold: {actual}");
+                    assert_eq!(ui.get_output_closed_label().as_str(), if actual < 240. { if english { "Change output" } else { "تغییر خروجی" } } else { full });
+                }
+            }
+        }
+        // Real control input still selects the original model row and invokes
+        // the existing callback once; a deliberate default never receives the change-output prompt.
+        adapter.set_size(slint::LogicalSize::new(1160., 860.));
+        draw();
+        click(&ui, ui.get_output_combo_bounds());
+        draw();
+        press(&ui, Key::DownArrow);
+        assert_eq!(ui.get_output_index(), 1);
+        assert_eq!(ui.get_output_full_value().as_str(), "System default");
+        assert_eq!(changes.get(), 1);
+        press(&ui, Key::Escape);
+        ui.set_output_unavailable(false);
+        draw();
+        assert_eq!(ui.get_output_closed_label().as_str(), "System default");
+        ui.hide().unwrap();
     }
 
     #[test]

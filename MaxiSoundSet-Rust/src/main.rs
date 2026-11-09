@@ -3,6 +3,7 @@ mod app_log;
 mod app_update;
 mod update_handoff;
 mod audio_engine;
+mod audio_routing;
 mod background;
 mod components;
 mod cable_evidence;
@@ -31,6 +32,28 @@ use std::{
 };
 slint::include_modules!();
 
+struct DeviceChoice {
+    id: String,
+    name: String,
+    available: bool,
+}
+
+#[derive(Clone, Copy)]
+enum AudioErrorPresentation {
+    DeviceInvalidated { english: bool },
+}
+impl AudioErrorPresentation {
+    fn text(self) -> &'static str {
+        match self {
+            Self::DeviceInvalidated { english } => device_invalidated_notice(english),
+        }
+    }
+}
+fn device_invalidated_notice(english: bool) -> &'static str {
+    if english { "Audio device disconnected or changed. Connect or select a device, refresh devices, then Run." }
+    else { "دستگاه صوتی قطع شد یا تغییر کرد. دستگاه را وصل یا انتخاب کن؛ سپس «به‌روزرسانی» و «اجرا» را بزن." }
+}
+
 struct State {
     background: background::Background,
     devices_pending: bool,
@@ -43,11 +66,14 @@ struct State {
     app_updates: app_update::Manager,
     update_handoff_result: Option<std::sync::mpsc::Receiver<Result<update_handoff::HealthProbe>>>,
     update_health: Option<update_handoff::HealthProbe>,
-    outputs: Vec<String>,
-    sources: Vec<String>,
+    outputs: Vec<DeviceChoice>,
+    sources: Vec<DeviceChoice>,
+    device_inventory: Vec<core_audio::DeviceInfo>,
     history: VecDeque<LevelPoint>,
     save_at: Option<Instant>,
     error: Option<String>,
+    audio_error_presentation: Option<AudioErrorPresentation>,
+    initialization_error: Option<String>,
     audio_apps: Vec<conflicts::AudioApp>,
     conflict_scan_at: Instant,
     unmute_target: Option<i32>,
@@ -144,14 +170,15 @@ fn show(ui: &AppWindow) {
         window_repaint::after_show(ui);
     }
 }
-fn notify_action(ui: &AppWindow, osd: &Rc<RefCell<Option<osd::Osd>>>, title_fa: &str, title_en: &str, detail_fa: &str, detail_en: &str) {
-    log::debug!("Background notification requested: UI visible={}, OSD initialized={}", ui.window().is_visible(), osd.borrow().is_some());
-    let english = ui.get_english();
-    let title = if english { title_en } else { title_fa };
-    let detail = if english { detail_en } else { detail_fa };
-    if ui.window().is_visible() {
-        let notice = if detail.is_empty() { title.to_string() } else { format!("{title} · {detail}") };
-        ui.set_volume_notice(notice.into());
+fn dashboard_accepts_notice(ui: &AppWindow) -> bool {
+    ui.window().is_visible() && !ui.window().is_minimized()
+}
+fn present_notice(ui: &AppWindow, osd: &Rc<RefCell<Option<osd::Osd>>>, notice: osd::Notice<'_>) {
+    log::debug!("Background notification requested: UI visible={}, minimized={}, OSD initialized={}", ui.window().is_visible(), ui.window().is_minimized(), osd.borrow().is_some());
+    if dashboard_accepts_notice(ui) {
+        let value = notice.value.map(|value| format!(" · {value}%")).unwrap_or_default();
+        let text = if notice.detail.is_empty() { format!("{}{value}", notice.title) } else { format!("{}{value} · {}", notice.title, notice.detail) };
+        ui.invoke_show_volume_notice(text.into());
     } else {
         if osd.borrow().is_none() {
             match osd::Osd::new() {
@@ -163,9 +190,109 @@ fn notify_action(ui: &AppWindow, osd: &Rc<RefCell<Option<osd::Osd>>>, title_fa: 
             }
         }
         if let Some(window) = osd.borrow().as_ref() {
-            window.show(title, detail, !english);
+            window.show_notice(notice);
         }
     }
+}
+fn notify_action(ui: &AppWindow, osd: &Rc<RefCell<Option<osd::Osd>>>, icon: osd::NoticeIcon, title_fa: &str, title_en: &str, detail_fa: &str, detail_en: &str) {
+    let english = ui.get_english();
+    present_notice(ui, osd, osd::Notice {
+        title: if english { title_en } else { title_fa },
+        detail: if english { detail_en } else { detail_fa },
+        rtl: !english, icon, value: None, anchor: None,
+    });
+}
+fn notify_audio_failure(ui: &AppWindow, osd: &Rc<RefCell<Option<osd::Osd>>>, title_fa: &str, title_en: &str, error: &str) {
+    // Full diagnostics remain in status/log and the visible app. A short OSD
+    // must not clip an arbitrary error chain into an apparently complete one.
+    if dashboard_accepts_notice(ui) {
+        notify_action(ui, osd, osd::NoticeIcon::Warning, title_fa, title_en, error, error);
+    } else {
+        notify_action(ui, osd, osd::NoticeIcon::Warning, title_fa, title_en,
+            "برای جزئیات، گزارش برنامه را باز کن.", "Open the app log for details.");
+    }
+}
+fn clear_audio_error(ui: &AppWindow, state: &mut State) {
+    state.error = None;
+    state.audio_error_presentation = None;
+    ui.set_audio_error("".into());
+}
+fn refresh_audio_error_presentation(ui: &AppWindow, state: &mut State) {
+    let Some(previous) = state.audio_error_presentation else { return; };
+    // The kind and previous language identify exactly the text we own. Slint's
+    // X clears the card independently; a language change must not revive it or
+    // overwrite a newer recovery/exit message.
+    if ui.get_audio_error().as_str() != previous.text() {
+        state.audio_error_presentation = None;
+        return;
+    }
+    let next = AudioErrorPresentation::DeviceInvalidated { english: ui.get_english() };
+    ui.set_audio_error(next.text().into());
+    if ui.get_status().as_str() == previous.text() { ui.set_status(next.text().into()); }
+    state.audio_error_presentation = Some(next);
+}
+fn present_audio_failure(ui: &AppWindow, state: &mut State, osd: &Rc<RefCell<Option<osd::Osd>>>, raw: String, presentation: Option<AudioErrorPresentation>) {
+    let display = presentation.map(|kind| kind.text().to_owned()).unwrap_or_else(|| raw.clone());
+    state.error = Some(raw);
+    state.audio_error_presentation = presentation;
+    ui.set_audio_error(display.clone().into());
+    ui.set_status(display.clone().into());
+    if state.hotkey_pending_audio.take().is_some() {
+        // The persistent dashboard card already owns the localized message.
+        // Avoid a second transient that could resurface in an old language
+        // after dismissal/Run. The hidden/minimized OSD keeps its short route.
+        if presentation.is_none() || !dashboard_accepts_notice(ui) {
+            notify_audio_failure(ui, osd, "عملیات صدا ناموفق بود", "Audio action failed", &display);
+        }
+    } else { show(ui); }
+}
+fn notify_target(ui: &AppWindow, osd: &Rc<RefCell<Option<osd::Osd>>>, anchor: Option<(i32, i32)>) {
+    let english = ui.get_english();
+    let (title, detail) = match (ui.get_running(), ui.get_paused(), english) {
+        (false, _, true) => ("Playback stopped", "Saved · Run to apply"),
+        (false, _, false) => ("پردازش متوقف است", "ذخیره شد؛ «اجرا» را بزنید"),
+        (true, true, true) => ("Playback paused", "Saved · Resume to apply"),
+        (true, true, false) => ("پردازش در حالت مکث است", "ذخیره شد؛ «ادامه» را بزنید"),
+        (true, false, true) => ("Volume target", ""),
+        (true, false, false) => ("سطح صدای هدف", ""),
+    };
+    present_notice(ui, osd, osd::Notice {
+        title, detail, rtl: !english,
+        icon: if ui.get_target() == 0 { osd::NoticeIcon::Muted } else { osd::NoticeIcon::Volume },
+        value: Some(ui.get_target()), anchor,
+    });
+}
+fn handle_tray_scroll(ui: &AppWindow, state: &Rc<RefCell<State>>, osd: &Rc<RefCell<Option<osd::Osd>>>, windows_mode: bool, steps: i32, anchor: (i32, i32)) {
+    // A mode switch can commit before an already emitted native action drains.
+    // Keep that old gesture from being reinterpreted with the new mode's range.
+    if windows_mode != (ui.get_mode() == 0) || steps == 0 || !tray_scroll_allowed(ui, &state.borrow()) { return; }
+    let target = target_after_wheel(ui.get_target(), steps, ui.get_mode());
+    if target != ui.get_target() {
+        ui.set_target(target);
+        let mut state = state.borrow_mut();
+        // Wheel-up from zero is deliberately gradual, unlike the restore hotkey.
+        state.unmute_target = None;
+        read_config(ui, &mut state);
+    }
+    notify_target(ui, osd, Some(anchor));
+}
+fn target_after_wheel(current: i32, steps: i32, mode: i32) -> i32 {
+    current.saturating_add(steps.saturating_mul(2)).clamp(0, if mode == 0 { 100 } else { 200 })
+}
+fn tray_scroll_allowed(ui: &AppWindow, state: &State) -> bool {
+    !state.exiting && !ui.get_busy() && !state.components.busy && ui.get_hotkey_capture_index() < 0
+}
+fn audio_toggle_allowed(ui: &AppWindow, state: &State) -> bool {
+    !ui.get_busy() && !state.exiting && (ui.get_running()
+        || (!state.components.busy && !state.devices_pending && ui.get_devices_ready() && ui.get_recovery_ready()
+            && selected_devices_available(ui, state)))
+}
+fn handle_tray_start(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    // A queued Run is an explicit start request, never a toggle into Stop.
+    // Release the State borrow before invoking the callback, which rechecks
+    // the same readiness gate and marks an accepted start busy synchronously.
+    let allowed = !ui.get_running() && audio_toggle_allowed(ui, &state.borrow());
+    if allowed { ui.invoke_toggle_audio(); }
 }
 fn profile_label(profile: i32, english: bool) -> &'static str {
     const EN: [&str; 8] = ["System default", "Gentle", "Voice / dialogue", "Music", "Cinema", "Warm & relaxed", "Gaming focus", "Custom equalizer"];
@@ -184,11 +311,16 @@ fn unavailable_audio_control_shortcut(ui: &AppWindow, action: usize) -> Option<(
 fn handle_hotkey(ui: &AppWindow, state: &Rc<RefCell<State>>, osd: &Rc<RefCell<Option<osd::Osd>>>, action: usize) {
     if state.borrow().exiting { return; }
     if ui.get_busy() {
-        notify_action(ui, osd, "در حال اجرا", "Audio busy", "درخواست قبلی هنوز کامل نشده است.", "The previous audio action is still pending.");
+        notify_action(ui, osd, osd::NoticeIcon::Warning, "در حال اجرا", "Audio busy", "درخواست قبلی هنوز کامل نشده است.", "The previous audio action is still pending.");
         return;
     }
     if let Some((detail_fa, detail_en)) = unavailable_audio_control_shortcut(ui, action) {
-        notify_action(ui, osd, "در دسترس نیست", "Unavailable", detail_fa, detail_en);
+        let (title_fa, title_en) = match action {
+            8 => ("بهبود صدا غیرفعال", "Enhancement unavailable"),
+            9 => ("پروفایل غیرفعال", "Profile unavailable"),
+            _ => ("نرم‌سازی غیرفعال", "Smoothing unavailable"),
+        };
+        notify_action(ui, osd, osd::NoticeIcon::Warning, title_fa, title_en, detail_fa, detail_en);
         return;
     }
     match action {
@@ -201,76 +333,69 @@ fn handle_hotkey(ui: &AppWindow, state: &Rc<RefCell<State>>, osd: &Rc<RefCell<Op
             } else { ui.get_target() };
             ui.set_target((current + delta).clamp(0, ceiling));
             read_config(ui, &mut state.borrow_mut());
-            let detail_fa = format!("سطح هدف: {}٪", ui.get_target());
-            let detail_en = format!("Target: {}%", ui.get_target());
-            notify_action(ui, osd, "تغییر ولوم", "Volume changed", &detail_fa, &detail_en);
+            notify_target(ui, osd, None);
         }
         2 | 13 => {
             let unmute_target = state.borrow_mut().unmute_target.take();
-            let mut muted = false;
             if ui.get_target() > 0 {
                 state.borrow_mut().unmute_target = Some(ui.get_target());
                 ui.set_target(0);
-                muted = true;
             } else if let Some(target) = unmute_target {
                 ui.set_target(target.clamp(0, if ui.get_mode() == 0 { 100 } else { 200 }));
             } else {
                 ui.set_target(state.borrow().settings.default_volume.clamp(1, 100));
             }
             read_config(ui, &mut state.borrow_mut());
-            let detail_fa = format!("سطح هدف: {}٪", ui.get_target());
-            let detail_en = format!("Target: {}%", ui.get_target());
-            if muted { notify_action(ui, osd, "صدا قطع شد", "Muted", &detail_fa, &detail_en); }
-            else { notify_action(ui, osd, "صدا وصل شد", "Unmuted", &detail_fa, &detail_en); }
+            notify_target(ui, osd, None);
         }
         3 => {
-            if ui.get_running() { notify_action(ui, osd, "صدا در حال اجراست", "Audio already running", "", ""); }
+            if ui.get_running() { notify_action(ui, osd, osd::NoticeIcon::Play, "صدا در حال اجراست", "Audio already running", "", ""); }
             else if !ui.get_devices_ready() || !ui.get_recovery_ready() {
-                notify_action(ui, osd, "صدا هنوز آماده نیست", "Audio is not ready", "منتظر آماده‌شدن دستگاه‌ها و بازیابی صدا بمان.", "Wait for audio-device initialization and recovery.");
+                notify_action(ui, osd, osd::NoticeIcon::Warning, "صدا هنوز آماده نیست", "Audio is not ready", "منتظر آماده‌شدن دستگاه‌ها و بازیابی صدا بمان.", "Wait for audio-device initialization and recovery.");
             }
             else {
                 ui.invoke_toggle_audio();
                 if ui.get_busy() {
                     state.borrow_mut().hotkey_pending_audio = Some(HotkeyPendingAudio::Start);
-                    notify_action(ui, osd, "در حال شروع صدا", "Starting audio", "در انتظار آماده‌شدن موتور صدا", "Waiting for the audio engine");
+                    notify_action(ui, osd, osd::NoticeIcon::Play, "در حال شروع صدا", "Starting audio", "در انتظار آماده‌شدن موتور صدا", "Waiting for the audio engine");
                 } else {
                     let detail = state.borrow().error.clone().unwrap_or_else(|| "موتور صدا شروع نشد".into());
-                    notify_action(ui, osd, "شروع صدا ناموفق بود", "Could not start audio", &detail, &detail);
+                    notify_audio_failure(ui, osd, "شروع صدا ناموفق بود", "Could not start audio", &detail);
                 }
             }
         }
         4 => {
             if ui.get_running() {
                 ui.invoke_toggle_pause();
-                if ui.get_paused() { notify_action(ui, osd, "صدا مکث شد", "Audio paused", "", ""); }
-                else { notify_action(ui, osd, "پخش ادامه یافت", "Audio resumed", "", ""); }
-            } else { notify_action(ui, osd, "صدا اجرا نیست", "Audio is not running", "برای مکث، ابتدا صدا را اجرا کن.", "Start audio before using pause."); }
+                if ui.get_paused() { notify_action(ui, osd, osd::NoticeIcon::Pause, "صدا مکث شد", "Audio paused", "", ""); }
+                else { notify_action(ui, osd, osd::NoticeIcon::Play, "پخش ادامه یافت", "Audio resumed", "", ""); }
+            } else { notify_action(ui, osd, osd::NoticeIcon::Warning, "صدا اجرا نیست", "Audio is not running", "برای مکث، ابتدا صدا را اجرا کن.", "Start audio before using pause."); }
         }
         5 => {
             if ui.get_running() {
                 state.borrow().engine.stop(); ui.set_busy(true); ui.set_status("Stopping and restoring audio…".into());
                 state.borrow_mut().hotkey_pending_audio = Some(HotkeyPendingAudio::Stop);
-                notify_action(ui, osd, "در حال توقف صدا", "Stopping audio", "در حال بازگردانی دستگاه صدا", "Restoring the audio device");
-            } else { notify_action(ui, osd, "صدا متوقف است", "Audio is already stopped", "", ""); }
+                notify_action(ui, osd, osd::NoticeIcon::Stop, "در حال توقف صدا", "Stopping audio", "در حال بازگردانی دستگاه صدا", "Restoring the audio device");
+            } else { notify_action(ui, osd, osd::NoticeIcon::Stop, "صدا متوقف است", "Audio is already stopped", "", ""); }
         }
         6 => {
             ui.set_leveling(!ui.get_leveling()); read_config(ui, &mut state.borrow_mut());
-            if ui.get_leveling() { notify_action(ui, osd, "بلندی پایدار روشن", "Steady loudness on", "", ""); }
-            else { notify_action(ui, osd, "بلندی پایدار خاموش", "Steady loudness off", "", ""); }
+            if ui.get_leveling() { notify_action(ui, osd, osd::NoticeIcon::Leveling, "بلندی پایدار روشن", "Steady loudness on", "", ""); }
+            else { notify_action(ui, osd, osd::NoticeIcon::Leveling, "بلندی پایدار خاموش", "Steady loudness off", "", ""); }
         }
         7 => {
             ui.set_intensity(match ui.get_intensity() { 2 => 1, 1 => 0, _ => 2 }); read_config(ui, &mut state.borrow_mut());
             let level = match ui.get_intensity() { 2 => ("کم", "Low"), 1 => ("متوسط", "Balanced"), _ => ("زیاد", "High") };
-            if ui.get_leveling() { notify_action(ui, osd, "شدت بلندی پایدار", "Loudness intensity", level.0, level.1); }
-            else { notify_action(ui, osd, "شدت ذخیره شد", "Intensity saved", "برای اعمال، بلندی پایدار را روشن کن.", "Turn on steady loudness to apply it."); }
+            if ui.get_leveling() { notify_action(ui, osd, osd::NoticeIcon::Leveling, "شدت بلندی پایدار", "Loudness intensity", level.0, level.1); }
+            else { notify_action(ui, osd, osd::NoticeIcon::Leveling, "شدت ذخیره شد", "Intensity saved", "برای اعمال، بلندی پایدار را روشن کن.", "Turn on steady loudness to apply it."); }
         }
         8 => {
             if ui.get_profile() == 0 { ui.set_profile(ui.get_last_profile().clamp(1, 7)); }
             else { ui.set_last_profile(ui.get_profile()); ui.set_profile(0); }
             read_config(ui, &mut state.borrow_mut());
             let profile = profile_label(ui.get_profile(), ui.get_english());
-            if ui.get_profile() == 0 { notify_action(ui, osd, "بهبود صدا خاموش", "Enhancement off", profile, profile); }
-            else { notify_action(ui, osd, "بهبود صدا روشن", "Enhancement on", profile, profile); }
+            if ui.get_profile() == 0 { notify_action(ui, osd, osd::NoticeIcon::Profile, "بهبود صدا خاموش", "Enhancement off", profile, profile); }
+            else { notify_action(ui, osd, osd::NoticeIcon::Profile, "بهبود صدا روشن", "Enhancement on", profile, profile); }
         }
         9 => {
             let next = (ui.get_profile() + 1) % 8;
@@ -280,12 +405,12 @@ fn handle_hotkey(ui: &AppWindow, state: &Rc<RefCell<State>>, osd: &Rc<RefCell<Op
             let label = profile_label(next, ui.get_english());
             let detail_fa = format!("پروفایل: {label}");
             let detail_en = format!("Profile: {label}");
-            notify_action(ui, osd, "پروفایل بهبود صدا", "Enhancement profile", &detail_fa, &detail_en);
+            notify_action(ui, osd, osd::NoticeIcon::Profile, "پروفایل بهبود صدا", "Enhancement profile", &detail_fa, &detail_en);
         }
         10 => {
             ui.invoke_request_treble_smoothing(!ui.get_treble_smoothing());
-            if ui.get_treble_smoothing() { notify_action(ui, osd, "نرم‌سازی صدای زیر روشن", "Treble smoothing on", "", ""); }
-            else { notify_action(ui, osd, "نرم‌سازی صدای زیر خاموش", "Treble smoothing off", "", ""); }
+            if ui.get_treble_smoothing() { notify_action(ui, osd, osd::NoticeIcon::Smoothing, "نرم‌سازی صدای زیر روشن", "Treble smoothing on", "", ""); }
+            else { notify_action(ui, osd, osd::NoticeIcon::Smoothing, "نرم‌سازی صدای زیر خاموش", "Treble smoothing off", "", ""); }
         }
         _ => log::warn!("Unknown global shortcut action index {action}"),
     }
@@ -449,61 +574,140 @@ fn open(target: &str) {
         log::error!("Could not open {target}");
     }
 }
-fn refresh(ui: &AppWindow, state: &mut State) -> Result<()> {
-    if !state.devices_pending && !state.exiting {
-        state.background.submit(if ui.get_recovery_ready() {
-            background::Job::Devices
-        } else {
-            background::Job::Initialize(state.data.clone())
-        })?;
-        state.devices_pending = true;
-        ui.set_devices_ready(false);
+fn refresh(ui: &AppWindow, state: &mut State) -> Result<bool> {
+    // Internal component callbacks share this boundary with the manual button.
+    // Pause retains live streams, so it must not permit inventory replacement.
+    if state.devices_pending || state.exiting || ui.get_running()
+        || ui.get_busy() || state.components.busy {
+        return Ok(false);
     }
-    Ok(())
+    let submitted = state.background.submit(if ui.get_recovery_ready() {
+        background::Job::Devices
+    } else {
+        background::Job::Initialize(state.data.clone())
+    });
+    if let Err(error) = submitted {
+        ui.set_devices_ready(false);
+        ui.set_device_refresh_state(3);
+        return Err(error);
+    }
+    state.devices_pending = true;
+    ui.set_devices_ready(false);
+    ui.set_device_refresh_state(0);
+    Ok(true)
+}
+fn request_device_refresh(ui: &AppWindow, state: &mut State) {
+    match refresh(ui, state) {
+        Ok(true) => {
+            log_device_selection("Refresh requested", state);
+            ui.set_device_refresh_state(1);
+        }
+        Ok(false) => (),
+        Err(error) => {
+            log::error!("Refresh audio devices: {error:#}");
+            ui.set_device_refresh_state(3);
+        }
+    }
+}
+fn log_device_selection(context: &str, state: &State) {
+    let available = |rows: &[DeviceChoice], id: &str| rows.iter()
+        .find(|row| row.id == id).map(|row| row.available);
+    log::info!("Audio selection ({context}): mode={}, source_id={:?}, source_available={:?}, output_intent={}, output_id={:?}, output_available={:?}, auto_route={}",
+        state.settings.mode, state.settings.source_id,
+        available(&state.sources, &state.settings.source_id),
+        if state.settings.output_id.is_empty() { "System default" } else { "Explicit endpoint" },
+        state.settings.output_id, available(&state.outputs, &state.settings.output_id),
+        state.settings.auto_route);
+}
+fn selected_devices_available(ui: &AppWindow, state: &State) -> bool {
+    let available = |rows: &[DeviceChoice], index: i32| {
+        usize::try_from(index).ok().and_then(|i| rows.get(i)).is_some_and(|row| row.available)
+    };
+    available(&state.outputs, ui.get_output_index())
+        && (ui.get_mode() != 1 || available(&state.sources, ui.get_source_index()))
+}
+fn sync_device_labels(ui: &AppWindow, state: &State) {
+    let english = ui.get_english();
+    let label = |row: &DeviceChoice, source: bool| {
+        if row.id.is_empty() {
+            if source {
+                if state.device_inventory.iter().any(|d| d.virtual_input) {
+                    if english { "Select a virtual input" } else { "ورودی مجازی را انتخاب کن" }
+                } else if english { "Install VB-CABLE first" } else { "ابتدا VB-CABLE را نصب کنید" }
+            } else if english { "System default" } else { "خروجی پیش‌فرض ویندوز" }.to_string()
+        } else if row.available {
+            row.name.clone()
+        } else {
+            let name = if row.name.is_empty() {
+                if source { if english { "Selected virtual input" } else { "ورودی مجازی انتخاب‌شده" } }
+                else if english { "Selected output" } else { "خروجی انتخاب‌شده" }
+            } else { &row.name };
+            format!("{} · {name}", if english { "Unavailable" } else { "در دسترس نیست" })
+        }
+    };
+    let output_index = ui.get_output_index();
+    let source_index = ui.get_source_index();
+    ui.set_outputs(strings(state.outputs.iter().map(|row| label(row, false)).collect()));
+    ui.set_sources(strings(state.sources.iter().map(|row| label(row, true)).collect()));
+    ui.set_output_index(output_index);
+    ui.set_source_index(source_index);
+    sync_device_availability(ui, state);
+}
+fn sync_device_availability(ui: &AppWindow, state: &State) {
+    let unavailable = |rows: &[DeviceChoice], index: i32| {
+        usize::try_from(index).ok().and_then(|i| rows.get(i)).is_none_or(|row| !row.available)
+    };
+    ui.set_output_unavailable(unavailable(&state.outputs, ui.get_output_index()));
+    ui.set_source_unavailable(unavailable(&state.sources, ui.get_source_index()));
 }
 fn apply_devices(ui: &AppWindow, state: &mut State, all: Vec<core_audio::DeviceInfo>) {
     let cable = all
         .iter()
         .any(|d| d.vb_cable);
-    let mut names = vec![if ui.get_english() {
-        "System default"
-    } else {
-        "خروجی پیش‌فرض ویندوز"
-    }
-    .to_string()];
-    state.outputs = vec![String::new()];
+    let mut outputs = vec![DeviceChoice { id: String::new(), name: String::new(), available: true }];
     let mut sources = Vec::new();
-    state.sources.clear();
     for d in &all {
+        let row = DeviceChoice { id: d.id.clone(), name: d.name.clone(), available: true };
         if d.virtual_input {
-            sources.push(d.name.clone());
-            state.sources.push(d.id.clone());
+            sources.push(row);
         } else {
-            names.push(d.name.clone());
-            state.outputs.push(d.id.clone());
+            outputs.push(row);
         }
     }
-    if sources.is_empty() {
-        sources.push("Install VB-CABLE first".into());
-        state.sources.push(String::new());
+    // Only an empty source preference opts into choosing the initial cable.
+    if state.settings.source_id.is_empty() {
+        if let Some(id) = audio_routing::initial_source(&all) { state.settings.source_id = id; }
     }
-    ui.set_outputs(strings(names));
-    ui.set_sources(strings(sources));
+    for (rows, previous, selected) in [
+        (&mut outputs, &state.outputs, &state.settings.output_id),
+        (&mut sources, &state.sources, &state.settings.source_id),
+    ] {
+        if !selected.is_empty() && !rows.iter().any(|row| &row.id == selected) {
+            let name = previous.iter().find(|row| &row.id == selected).map(|row| row.name.clone()).unwrap_or_default();
+            rows.push(DeviceChoice { id: selected.clone(), name, available: false });
+        }
+    }
+    if sources.is_empty() || state.settings.source_id.is_empty() {
+        sources.insert(0, DeviceChoice { id: String::new(), name: String::new(), available: false });
+    }
+    state.device_inventory = all.clone();
+    state.outputs = outputs;
+    state.sources = sources;
     ui.set_output_index(
         state
             .outputs
             .iter()
-            .position(|id| *id == state.settings.output_id)
+            .position(|row| row.id == state.settings.output_id)
             .unwrap_or(0) as i32,
     );
     ui.set_source_index(
         state
             .sources
             .iter()
-            .position(|id| *id == state.settings.source_id)
+            .position(|row| row.id == state.settings.source_id)
             .unwrap_or(0) as i32,
     );
-    state.settings.source_id = state.sources[ui.get_source_index() as usize].clone();
+    sync_device_labels(ui, state);
     ui.set_cable_installed(cable);
     ui.set_component_status(
         if cable {
@@ -525,7 +729,56 @@ fn apply_devices(ui: &AppWindow, state: &mut State, all: Vec<core_audio::DeviceI
         .into(),
     );
     log::info!("Refreshed {} audio outputs; VB-CABLE={cable}", all.len());
+    log_device_selection("Scan completed", state);
     ui.set_devices_ready(true);
+}
+fn apply_device_result(ui: &AppWindow, state: &mut State, result: Result<Vec<core_audio::DeviceInfo>>) {
+    let manual = ui.get_device_refresh_state() == 1;
+    state.devices_pending = false;
+    match result {
+        Ok(devices) => {
+            apply_devices(ui, state, devices);
+            ui.set_device_refresh_state(if manual { 2 } else { 0 });
+        }
+        Err(error) => {
+            // Keep the last inventory and audio/recovery error. A scan failure
+            // cannot establish that remembered endpoints have disappeared.
+            log::error!("Audio devices: {error:#}");
+            log_device_selection("Scan failed; prior inventory/preferences retained", state);
+            ui.set_devices_ready(false);
+            ui.set_device_refresh_state(3);
+        }
+    }
+}
+fn apply_initialization_result(ui: &AppWindow, state: &mut State, result: Result<()>) {
+    match result {
+        Ok(()) => {
+            ui.set_recovery_ready(true);
+            if let Some(owned) = state.initialization_error.take() {
+                // Clear only this operation's previous failure. A newer audio
+                // or safe-exit error can replace either channel independently.
+                if state.error.as_deref() == Some(owned.as_str()) { state.error = None; }
+                if ui.get_audio_error().as_str() == owned {
+                    state.audio_error_presentation = None;
+                    ui.set_audio_error("".into());
+                }
+            }
+        }
+        Err(error) => {
+            // Initialize emits no Devices event on failure, so finish the scan here.
+            state.devices_pending = false;
+            ui.set_devices_ready(false);
+            ui.set_recovery_ready(false);
+            ui.set_device_refresh_state(3);
+            let message = format!("{error:#}");
+            log::error!("Startup recovery: {message}");
+            state.initialization_error = Some(message.clone());
+            state.error = Some(message.clone());
+            state.audio_error_presentation = None;
+            ui.set_status(message.clone().into());
+            ui.set_audio_error(message.into());
+        }
+    }
 }
 fn update_conflicts(ui: &AppWindow, state: &mut State) {
     let _ = ui;
@@ -610,7 +863,7 @@ fn read_config(ui: &AppWindow, s: &mut State) {
     }
     let max_target = if ui.get_mode() == 0 { 100 } else { 200 };
     if ui.get_target() > max_target {
-        ui.set_volume_notice(
+        ui.invoke_show_volume_notice(
             if ui.get_english() {
                 "Boost above 100 requires Full boost / virtual cable in Processing mode."
             } else {
@@ -623,20 +876,6 @@ fn read_config(ui: &AppWindow, s: &mut State) {
     ui.set_target(s.settings.target);
     s.settings.default_volume = ui.get_default_volume().clamp(0, 100);
     let language_changed = s.settings.english != ui.get_english();
-    if language_changed {
-        let mut labels: Vec<String> = ui.get_outputs().iter().map(|v| v.to_string()).collect();
-        if let Some(first) = labels.first_mut() {
-            *first = if ui.get_english() {
-                "System default"
-            } else {
-                "خروجی پیش‌فرض ویندوز"
-            }
-            .into();
-        }
-        let selected = ui.get_output_index();
-        ui.set_outputs(strings(labels));
-        ui.set_output_index(selected);
-    }
     s.settings.boost_db = ui.get_boost().clamp(0, 36);
     s.settings.speed = ui.get_reaction().clamp(0, 2);
     s.settings.intensity = ui.get_intensity().clamp(0, 2);
@@ -649,34 +888,63 @@ fn read_config(ui: &AppWindow, s: &mut State) {
     s.settings.auto_route = ui.get_auto_route();
     s.settings.debug_log = ui.get_debug_log();
     s.settings.english = ui.get_english();
-    if language_changed { sync_hotkey_rows(ui, s); }
-    if let Some(id) = s.outputs.get(ui.get_output_index().max(0) as usize) {
-        s.settings.output_id = id.clone();
+    if language_changed {
+        sync_hotkey_rows(ui, s);
+        refresh_audio_error_presentation(ui, s);
     }
-    if let Some(id) = s.sources.get(ui.get_source_index().max(0) as usize) {
-        s.settings.source_id = id.clone();
+    if let Some(row) = usize::try_from(ui.get_output_index()).ok().and_then(|i| s.outputs.get(i)) {
+        s.settings.output_id = row.id.clone();
     }
+    if let Some(row) = usize::try_from(ui.get_source_index()).ok().and_then(|i| s.sources.get(i)) {
+        s.settings.source_id = row.id.clone();
+    }
+    if language_changed { sync_device_labels(ui, s); }
+    else { sync_device_availability(ui, s); }
     s.engine.update(&s.settings);
     app_log::AppLogger::set_debug(s.settings.debug_log);
     s.save_at = Some(Instant::now());
 }
+fn prepare_audio_config(ui: &AppWindow, state: &State, resolve_default: impl FnOnce() -> Result<String>) -> Result<Settings> {
+    anyhow::ensure!(!ui.get_running() && !ui.get_busy() && !state.exiting
+        && !state.components.busy && !state.devices_pending && ui.get_devices_ready() && ui.get_recovery_ready(),
+        if ui.get_english() { "Wait for audio devices and recovery before starting audio." }
+        else { "پیش از اجرا، منتظر آماده‌شدن دستگاه‌ها و بازیابی صدا بمانید." });
+    anyhow::ensure!(selected_devices_available(ui, state),
+        if ui.get_english() { "The selected audio device is unavailable. Reconnect it, then refresh devices, or select another available device." }
+        else { "دستگاه انتخاب‌شده در دسترس نیست. آن را وصل کنید و دستگاه‌ها را به‌روزرسانی کنید، یا دستگاه دیگری انتخاب کنید." });
+    let mut config = state.settings.clone();
+    if config.mode == 1 && config.output_id.is_empty() {
+        let message = audio_routing::guidance(ui.get_english());
+        let id = resolve_default().context(message)?;
+        // Resolve only this run: the UI and saved preference remain System default.
+        // Full's own routing subsequently makes the cable the Windows default.
+        let output = audio_routing::resolve_output(&config, &state.device_inventory, Some(&id))?;
+        // A remembered cable fallback is re-resolved from fresh hardware evidence
+        // by the worker; it must not masquerade as an explicit user choice.
+        if !audio_routing::selected_cable(&config, &state.device_inventory, &id) { config.output_id = output; }
+    }
+    Ok(config)
+}
 fn start_audio(ui: &AppWindow, s: &mut State) {
     read_config(ui, s);
-    if s.settings.mode == 1 && s.settings.output_id.is_empty() {
-        let id = core_audio::ComScope::new()
-            .and_then(|_com| core_audio::default_id(1))
-            .unwrap_or_default();
-        if let Some(i) = s
-            .outputs
-            .iter()
-            .position(|d| !d.is_empty() && *d == id)
-            .or_else(|| s.outputs.iter().position(|d| !d.is_empty()))
-        {
-            ui.set_output_index(i as i32);
-            s.settings.output_id = s.outputs[i].clone();
+    log_device_selection("Run requested", s);
+    let config = match prepare_audio_config(ui, s, || {
+        let _com = core_audio::ComScope::new()?;
+        core_audio::default_id(1)
+    }) {
+        Ok(config) => config,
+        Err(error) => {
+            log::error!("Start audio: {error:#}");
+            let message = format!("{error:#}");
+            s.error = Some(message.clone());
+            ui.set_status(message.clone().into());
+            ui.set_audio_error(message.into());
+            return;
         }
-    }
-    let config = s.settings.clone();
+    };
+    log::info!("Audio run configuration: mode={}, source_id={:?}, output_id={:?}, output_resolved_for_run={}, auto_route={}",
+        config.mode, config.source_id, config.output_id,
+        config.output_id != s.settings.output_id, config.auto_route);
     let data = s.data.clone();
     match s.engine.start(config, data) {
         Ok(()) => {
@@ -717,6 +985,7 @@ fn exit(ui: &AppWindow, state: &Rc<RefCell<State>>, osd: &Rc<RefCell<Option<osd:
         s.exiting = false;
         ui.set_busy(false);
         log::error!("Background worker is unavailable; retry Exit app.");
+        s.audio_error_presentation = None;
         ui.set_audio_error(if ui.get_english() {
             "Safe exit failed. Please retry Exit app."
         } else {
@@ -727,7 +996,8 @@ fn exit(ui: &AppWindow, state: &Rc<RefCell<State>>, osd: &Rc<RefCell<Option<osd:
 
 fn run() -> Result<()> {
     let preview_args: Vec<String> = std::env::args().collect();
-    let native_preview = preview_args.iter().any(|arg| arg == "--native-window-preview");
+    let popup_preview = preview_args.iter().any(|arg| arg == "--popup-preview");
+    let native_preview = popup_preview || preview_args.iter().any(|arg| arg == "--native-window-preview");
     anyhow::ensure!(
         !native_preview || preview_args.iter().any(|arg| arg == "--layout-preview"),
         "--native-window-preview requires --layout-preview"
@@ -754,6 +1024,17 @@ fn run() -> Result<()> {
         ui.set_sources(Rc::new(VecModel::from(vec![slint::SharedString::from("CABLE Output (VB-Audio Virtual Cable)")])).into());
         ui.set_hotkey_rows(Rc::new(VecModel::from((0..8).map(|i| HotkeyRow { name: format!("Shortcut {i} / میان‌بر صدا").into(), chord: "Ctrl + Alt + F12".into(), enabled: true, error: "".into() }).collect::<Vec<_>>())).into());
         ui.on_exit_app(|| { let _ = slint::quit_event_loop(); });
+        // An explicit, in-memory popup fixture. It never constructs production
+        // State, starts audio/update/network workers, or loads personal settings.
+        let popup_trace = if popup_preview {
+            let directory = PathBuf::from(preview_value("--popup-trace-dir").context("--popup-preview requires --popup-trace-dir")?);
+            fs::create_dir_all(&directory)?;
+            ui.set_mode(if preview_value("--preview-mode").is_some_and(|mode| mode == "windows") { 0 } else { 1 });
+            ui.set_target(preview_value("--preview-target").and_then(|value| value.parse::<i32>().ok()).unwrap_or(50).clamp(0, if ui.get_mode() == 0 { 100 } else { 200 }));
+            ui.set_running(preview_args.iter().any(|arg| arg == "--preview-running"));
+            ui.set_paused(ui.get_running() && preview_args.iter().any(|arg| arg == "--preview-paused"));
+            Some(fs::OpenOptions::new().write(true).create_new(true).open(directory.join("popup-preview.jsonl"))?)
+        } else { None };
         if preview_args.iter().any(|arg| arg == "--app-update-preview") {
             // Isolated visual fixture: this early-return branch never starts update,
             // settings, audio, registry, or network workers.
@@ -855,17 +1136,41 @@ fn run() -> Result<()> {
         // Install the same native window notification subclass as production,
         // once Winit has created its HWND. Keep only window lifecycle actions.
         let preview_tray: Rc<RefCell<Option<native_tray::Tray>>> = Rc::new(RefCell::new(None));
+        let preview_osd: Rc<RefCell<Option<osd::Osd>>> = Rc::new(RefCell::new(None));
         let preview_error: Rc<RefCell<Option<anyhow::Error>>> = Rc::new(RefCell::new(None));
         let preview_timer = slint::Timer::default();
+        if popup_preview {
+            let tray = preview_tray.clone();
+            ui.window().on_close_requested(move || {
+                if tray.borrow().as_ref().is_some_and(|tray| tray.is_registered()) { slint::CloseRequestResponse::HideWindow }
+                else { slint::CloseRequestResponse::KeepWindowShown }
+            });
+        }
         if native_preview {
             let weak = ui.as_weak();
             let tray = preview_tray.clone();
+            let osd = preview_osd.clone();
             let error = preview_error.clone();
+            let mut trace = popup_trace;
+            let mut unmute_target = None;
+            let started = Instant::now();
             preview_timer.start(slint::TimerMode::Repeated, Duration::from_millis(100), move || {
                 let Some(ui) = weak.upgrade() else { return; };
                 if tray.borrow().is_none() {
                     match native_tray::Tray::new() {
-                        Ok(value) => { *tray.borrow_mut() = Some(value); }
+                        Ok(mut value) => {
+                            if popup_preview {
+                                // Dedicated temporary test chords; no default media
+                                // shortcuts or user-persisted bindings are registered.
+                                let bindings: Vec<_> = [0x77, 0x78, 0x79].into_iter().map(|virtual_key| settings::HotkeyBinding { enabled: true, modifiers: 0x0007, virtual_key }).collect();
+                                let failures = value.register_hotkeys(&bindings);
+                                if !failures.is_empty() {
+                                    *error.borrow_mut() = Some(anyhow::anyhow!("Popup preview shortcut registration failed: {failures:?}"));
+                                    let _ = slint::quit_event_loop(); return;
+                                }
+                            }
+                            *tray.borrow_mut() = Some(value);
+                        }
                         Err(e) => {
                             *error.borrow_mut() = Some(e);
                             let _ = slint::quit_event_loop();
@@ -873,10 +1178,21 @@ fn run() -> Result<()> {
                         }
                     }
                 }
+                if popup_preview {
+                    let target = ui.get_target().clamp(0, if ui.get_mode() == 0 { 100 } else { 200 });
+                    if target != ui.get_target() { ui.set_target(target); }
+                    if let Some(tray) = tray.borrow_mut().as_mut() {
+                        tray.update(ui.get_running(), ui.get_paused(), ui.get_target(), ui.get_english(), ui.get_mode() == 0);
+                        tray.set_scroll_enabled(!ui.get_busy());
+                    }
+                }
                 let actions: Vec<_> = tray.borrow().as_ref()
                     .and_then(|value| value.events.as_ref())
                     .map(|events| events.try_iter().collect()).unwrap_or_default();
                 for action in actions {
+                    let action_name = format!("{action:?}");
+                    let before = (ui.get_target(), ui.get_running(), ui.get_paused(), ui.window().is_visible());
+                    let mut should_exit = false;
                     match action {
                         native_tray::Action::Show => show(&ui),
                         native_tray::Action::Repaint => {
@@ -885,14 +1201,53 @@ fn run() -> Result<()> {
                         native_tray::Action::FitWindow => {
                             if ui.window().is_visible() { window_repaint::fit_native_work_area(); }
                         }
-                        native_tray::Action::Exit => { ui.invoke_exit_app(); return; }
-                        _ => {} // Preview never dispatches audio, settings, or shortcut actions.
+                        native_tray::Action::ScrollTarget { steps, x, y, windows_mode } if popup_preview && windows_mode == (ui.get_mode() == 0) => {
+                            ui.set_target(target_after_wheel(ui.get_target(), steps, ui.get_mode()));
+                            unmute_target = None;
+                            notify_target(&ui, &osd, Some((x, y)));
+                        }
+                        native_tray::Action::Target(target) if popup_preview => {
+                            ui.set_target(target.clamp(0, if ui.get_mode() == 0 { 100 } else { 200 }));
+                            unmute_target = None;
+                        }
+                        native_tray::Action::Pause if popup_preview && ui.get_running() => {
+                            ui.set_paused(!ui.get_paused());
+                        }
+                        native_tray::Action::Start if popup_preview && !ui.get_running() => {
+                            ui.set_running(true);
+                            ui.set_paused(false);
+                        }
+                        native_tray::Action::Hotkey(index) if popup_preview && index < 3 => {
+                            if index == 2 {
+                                if ui.get_target() > 0 { unmute_target = Some(ui.get_target()); ui.set_target(0); }
+                                else { ui.set_target(unmute_target.take().unwrap_or(50).clamp(0, if ui.get_mode() == 0 { 100 } else { 200 })); }
+                            } else {
+                                let current = if ui.get_target() == 0 && index == 0 { unmute_target.take().unwrap_or(50) } else { ui.get_target() };
+                                ui.set_target((current + if index == 0 { 5 } else { -5 }).clamp(0, if ui.get_mode() == 0 { 100 } else { 200 }));
+                            }
+                            notify_target(&ui, &osd, None);
+                        }
+                        native_tray::Action::Refresh if popup_preview => {
+                            if let Some(tray) = tray.borrow_mut().as_mut() { let _ = tray.register(); }
+                        }
+                        native_tray::Action::Exit => { should_exit = true; }
+                        _ => {} // No preview action dispatches production services.
                     }
+                    if let Some(trace) = trace.as_mut() {
+                        use std::io::Write;
+                        let after = (ui.get_target(), ui.get_running(), ui.get_paused(), ui.window().is_visible());
+                        let record = serde_json::json!({"elapsed_ms":started.elapsed().as_millis(),"action":action_name,"synthetic_audio_state":true,"before":before,"after":after,"english":ui.get_english(),"mode":ui.get_mode(),"notice":ui.get_volume_notice().as_str()});
+                        if let Err(failure) = writeln!(trace, "{record}") {
+                            *error.borrow_mut() = Some(failure.into()); let _ = slint::quit_event_loop(); return;
+                        }
+                    }
+                    if should_exit { ui.invoke_exit_app(); return; }
                 }
             });
         }
         let result = slint::run_event_loop();
         preview_timer.stop();
+        preview_osd.borrow_mut().take();
         preview_tray.borrow_mut().take();
         if let Some(error) = preview_error.borrow_mut().take() { return Err(error); }
         result?;
@@ -1032,9 +1387,12 @@ fn run() -> Result<()> {
         engine: AudioEngine::new(),
         outputs: vec![],
         sources: vec![],
+        device_inventory: vec![],
         history: VecDeque::new(),
         save_at: None,
         error: None,
+        initialization_error: None,
+        audio_error_presentation: None,
         audio_apps: vec![],
         conflict_scan_at: Instant::now(),
         unmute_target: None,
@@ -1164,12 +1522,7 @@ fn run() -> Result<()> {
         ui.on_refresh_devices(move || {
             if let Some(u) = w.upgrade() {
                 let mut s = s.borrow_mut();
-                if !u.get_running() && !s.components.busy {
-                    if let Err(e) = refresh(&u, &mut s) {
-                        u.set_status(format!("{e:#}").into());
-                        u.set_audio_error(format!("{e:#}").into());
-                    }
-                }
+                request_device_refresh(&u, &mut s);
             }
         });
     }
@@ -1179,16 +1532,10 @@ fn run() -> Result<()> {
         ui.on_toggle_audio(move || {
             if let Some(u) = w.upgrade() {
                 let mut s = s.borrow_mut();
-                if u.get_busy()
-                    || s.components.busy
-                    || !u.get_devices_ready()
-                    || !u.get_recovery_ready()
-                    || s.exiting
-                {
+                if !audio_toggle_allowed(&u, &s) {
                     return;
                 }
-                s.error = None;
-                u.set_audio_error("".into());
+                clear_audio_error(&u, &mut s);
                 if u.get_running() {
                     s.engine.stop();
                     u.set_busy(true);
@@ -1475,6 +1822,7 @@ fn run() -> Result<()> {
     ui.set_logs(logs.clone().into());
     let log_revision = std::cell::Cell::new(u64::MAX);
     let tray_retry = std::cell::Cell::new(Instant::now() - Duration::from_secs(5));
+    let audio_diagnostics = RefCell::new(audio_engine::DiagnosticTransitions::default());
     {
         let w = ui.as_weak();
         let native = native.clone();
@@ -1549,6 +1897,9 @@ fn run() -> Result<()> {
                     let _ = u.hide();
                     log::info!("Windows logon launch: running in background");
                 }
+                if let Some(tray) = native.borrow_mut().as_mut() {
+                    tray.set_scroll_enabled(tray_scroll_allowed(&u, &s.borrow()));
+                }
                 let actions: Vec<_> = native.borrow().as_ref().and_then(|tray| tray.events.as_ref()).map(|events| events.try_iter().collect()).unwrap_or_default();
                 for action in actions {
                     match action {
@@ -1556,12 +1907,17 @@ fn run() -> Result<()> {
                         native_tray::Action::Repaint => { if u.window().is_visible() { window_repaint::full_redraw(u.window()); } }
                         native_tray::Action::FitWindow => { if u.window().is_visible() { window_repaint::fit_native_work_area(); } }
                         native_tray::Action::Pause => u.invoke_toggle_pause(),
+                        native_tray::Action::Start => handle_tray_start(&u, &s),
                         native_tray::Action::Hotkey(index) => handle_hotkey(&u, &s, &osd, index),
+                        native_tray::Action::ScrollTarget { steps, x, y, windows_mode } => handle_tray_scroll(&u, &s, &osd, windows_mode, steps, (x, y)),
                         native_tray::Action::CapturedHotkey(index, vk, modifiers) => accept_captured_hotkey(&u, &s, &native, index, vk, modifiers),
                         native_tray::Action::CaptureCancelled(index) => cancel_capture(&u, &s, &native, index),
                         native_tray::Action::Target(v) => {
-                            u.set_target(v);
-                            u.invoke_config_changed();
+                            if tray_scroll_allowed(&u, &s.borrow()) {
+                                u.set_target(v);
+                                s.borrow_mut().unmute_target = None;
+                                u.invoke_config_changed();
+                            }
                         }
                         native_tray::Action::Exit => {
                             // The installer may repost Exit while waiting. Keep draining
@@ -1584,17 +1940,10 @@ fn run() -> Result<()> {
                 for event in events {
                     match event {
                         background::Event::Initialized(result) => {
-                            match result {
-                                Ok(()) => { u.set_recovery_ready(true); s.error = None; u.set_audio_error("".into()); }
-                                Err(e) => { s.devices_pending = false; let message = format!("{e:#}"); log::error!("Startup recovery: {message}"); s.error = Some(message.clone()); u.set_status(message.clone().into()); u.set_audio_error(message.into()); }
-                            }
+                            apply_initialization_result(&u, &mut s, result);
                         }
                         background::Event::Devices(result) => {
-                            s.devices_pending = false;
-                            match result {
-                                Ok(devices) => apply_devices(&u, &mut s, devices),
-                                Err(e) => { log::error!("Audio devices: {e:#}"); u.set_audio_error(format!("{e:#}").into()); }
-                            }
+                            apply_device_result(&u, &mut s, result);
                         }
                         background::Event::Conflicts(result) => { s.conflicts_pending = false; apply_conflicts(&u, &mut s, result); }
                         background::Event::Startup(enabled, result) => { match result { Ok(()) => { u.set_startup(enabled);
@@ -1613,6 +1962,7 @@ fn run() -> Result<()> {
                                     };
                                     s.exiting = false;
                                     s.error = Some(message.into());
+                                    s.audio_error_presentation = None;
                                     u.set_busy(false);
                                     u.set_status(message.into());
                                     u.set_audio_error(message.into());
@@ -1642,6 +1992,10 @@ fn run() -> Result<()> {
                 }
                 for event in s.engine.poll() {
                     match event {
+                        AudioEvent::PhysicalOutput(id) => {
+                            s.settings.last_physical_output_id = id;
+                            s.save_at = Some(Instant::now());
+                        }
                         AudioEvent::Started => {
                             let from_hotkey = s.hotkey_pending_audio == Some(HotkeyPendingAudio::Start);
                             if from_hotkey { s.hotkey_pending_audio = None; }
@@ -1652,7 +2006,7 @@ fn run() -> Result<()> {
                                 s.settings.was_running = true;
                                 s.save_at = Some(Instant::now());
                             }
-                            if from_hotkey { notify_action(&u, &osd, "صدا آماده است", "Audio started", "پردازش صدا با موفقیت آغاز شد.", "Audio processing is ready."); }
+                            if from_hotkey { notify_action(&u, &osd, osd::NoticeIcon::Play, "صدا آماده است", "Audio started", "پردازش صدا با موفقیت آغاز شد.", "Audio processing is ready."); }
                         }
                         AudioEvent::Stopped => {
                             let from_hotkey = s.hotkey_pending_audio == Some(HotkeyPendingAudio::Stop);
@@ -1664,15 +2018,14 @@ fn run() -> Result<()> {
                                 s.settings.was_running = false;
                                 s.save_at = Some(Instant::now());
                             }
-                            if from_hotkey { notify_action(&u, &osd, "صدا متوقف شد", "Audio stopped", "دستگاه صوتی بازگردانی شد.", "The audio device has been restored."); }
+                            if from_hotkey { notify_action(&u, &osd, osd::NoticeIcon::Stop, "صدا متوقف شد", "Audio stopped", "دستگاه صوتی بازگردانی شد.", "The audio device has been restored."); }
                         }
                         AudioEvent::Error(e) | AudioEvent::RestoreWarning(e) => {
-                            let from_hotkey = s.hotkey_pending_audio.take().is_some();
-                            u.set_audio_error(e.clone().into());
-                            s.error = Some(e.clone());
-                            u.set_status(e.clone().into());
-                            if from_hotkey { notify_action(&u, &osd, "عملیات صدا ناموفق بود", "Audio action failed", &e, &e); }
-                            else { show(&u); }
+                            present_audio_failure(&u, &mut s, &osd, e, None);
+                        }
+                        AudioEvent::DeviceInvalidated(e) => {
+                            let presentation = AudioErrorPresentation::DeviceInvalidated { english: u.get_english() };
+                            present_audio_failure(&u, &mut s, &osd, e, Some(presentation));
                         }
                     }
                 }
@@ -1804,6 +2157,8 @@ fn run() -> Result<()> {
                     s.save_at = None;
                 }
                 let snap = *s.engine.snapshot.lock().unwrap_or_else(|p| p.into_inner());
+                audio_diagnostics.borrow_mut().report(startup_smoke_started.elapsed(), &snap,
+                    s.engine.controls.paused.load(std::sync::atomic::Ordering::Relaxed));
                 let m = snap.meters;
                 u.set_measurement_source(match snap.source {
                     audio_engine::MeasurementSource::Unavailable => 0,
@@ -1922,7 +2277,7 @@ fn run() -> Result<()> {
                     };
                     u.set_status(status.into());
                 }
-                if let Some(tray) = native.borrow_mut().as_mut() { tray.update(
+                if let Some(tray) = native.borrow_mut().as_mut() { tray.set_scroll_enabled(tray_scroll_allowed(&u, &s)); tray.update(
                     u.get_running(),
                     u.get_paused(),
                     u.get_target(),
@@ -1992,7 +2347,7 @@ fn run() -> Result<()> {
         30 => { snapshot_png(&u,&directory.join("Profile-Menu-EN.png"))?; u.invoke_close_profile_menu(); u.set_english(false); u.invoke_config_changed(); },
         31 => { anyhow::ensure!(u.get_target()==200 && Settings::load(&directory).target==200,"Full target200 not retained"); snapshot_png(&u,&directory.join("Sound-200-FA.png"))?; },
         32 => { let _ = u.hide(); },
-        33 => { anyhow::ensure!(!u.window().is_visible(), "UI smoke window remained visible after hide"); notify_action(&u, &osd, "اعلان آزمایشی", "Synthetic test notice", "اعلان پس‌زمینه", "Synthetic background notice"); },
+        33 => { anyhow::ensure!(!u.window().is_visible(), "UI smoke window remained visible after hide"); notify_action(&u, &osd, osd::NoticeIcon::Warning, "اعلان آزمایشی", "Synthetic test notice", "اعلان پس‌زمینه", "Synthetic background notice"); },
         34 => { anyhow::ensure!(osd.borrow().as_ref().is_some_and(|window| window.is_visible() && window.query_visibility(Duration::from_millis(800)) == Some(true)), "Lazy OSD HWND was not visible or its worker did not answer within 800 ms"); },
         35 => { anyhow::ensure!(osd.borrow().as_ref().is_some_and(|window| !window.is_visible() && window.query_visibility(Duration::from_millis(800)) == Some(false)), "OSD did not auto-hide or its worker did not answer within 800 ms"); let registered = native.borrow().as_ref().is_some_and(|tray| tray.is_registered()); fs::write(directory.join("ui-smoke.txt"), format!("PASS: Slint 1.18.0 FA/EN RTL sidebar and row ordering; Sound/profiles/settings/conflicts/About/components/log/dropdown/collapsed/minimum-window rendering; profile 0/1/6/7, steadying intensity and optional treble smoothing persist; routing help popup with explicit close control and treble-reduction meter render; Persian/English sidebar icons remain anchored throughout collapse/expand animation; Donate action and startup audio-resume preference render; custom 10-band EQ and reset persist independently; English System default updates on language switch; manual volume/boost, leveling and enhancement independently enabled; remembered profile; startup preferences persist without touching host registry; About Rust/Slint logo credits, v{} branding, localized update states including error/log access, and compact website/report/license actions; aligned Log controls with regular spacing; proportional header fully fills available width with Playback 20% narrower than Processing; no host app termination; Windows mode max100 and full mode 0/200; custom EQ FA/EN/minimum size; native Close hides; native tray Show/Exit dispatch; lazy synthetic layered OSD appeared, remained visible, then auto-hid\nNotification-area registration: {}\n", env!("CARGO_PKG_VERSION"), if registered { "PASS" } else { "UNVERIFIED: rejected by this sandboxed Windows session" }))?; u.invoke_exit_app(); }, _ => () } Ok(()) })(); if let Err(e) = result { log::error!("UI smoke: {e:#}"); let _ = fs::write(directory.join("ui-smoke.txt"), format!("FAIL {e:#}")); u.invoke_exit_app(); } *step += 1; });
     }
@@ -2069,107 +2424,33 @@ fn engine_smoke(data: &Path) -> Result<()> {
         .iter()
         .find(|d| d.vb_cable)
         .or_else(|| devices.iter().find(|d| d.virtual_input))
-        .context("An installed virtual cable is required for isolated leveler verification")?
+        .context("An installed virtual cable is required for routing verification")?
         .id
         .clone();
-    let tone = TestTone::start(id.clone());
+    anyhow::ensure!(!data.join("recovery.json").exists(), "Finish pending audio recovery before the smoke check");
     let ep = core_audio::Endpoint::new(&id)?;
     let original = ep.scalar()?;
     let muted = ep.muted()?;
     let mut e = AudioEngine::new();
-    e.start(
-        Settings {
-            target: 100,
-            output_id: id.clone(),
-            ..Default::default()
-        },
-        data.to_path_buf(),
-    )?;
-    std::thread::sleep(Duration::from_millis(800));
-    let events = e.poll();
-    anyhow::ensure!(
-        events.iter().any(|v| matches!(v, AudioEvent::Started)),
-        "Engine failed to start: {events:?}"
-    );
-    anyhow::ensure!(
-        ep.scalar()? <= 1.0 && ep.scalar()? > 0.0,
-        "Windows actuator must remain within its native range"
-    );
-    let snap = *e.snapshot.lock().unwrap();
-    anyhow::ensure!(
-        !snap.silent && (dsp::db(snap.meters.output as f64) - dsp::target_db(100)).abs() < 1.0,
-        "Native leveler did not normalize the isolated tone: {:?}",
-        (snap.meters.input, snap.meters.output, ep.db()?)
-    );
-    let source_rms = snap.meters.input;
-    e.controls
-        .target
-        .store(50, std::sync::atomic::Ordering::Relaxed);
-    std::thread::sleep(Duration::from_millis(400));
-    anyhow::ensure!(
-        ep.scalar()? <= 1.0 && ep.scalar()? > 0.0,
-        "Target 50 must remain audible while using the shared loudness scale"
-    );
-    let snap = *e.snapshot.lock().unwrap();
-    anyhow::ensure!(
-        (dsp::db(snap.meters.output as f64) - dsp::target_db(50)).abs() < 1.0,
-        "Native target50 not reached"
-    );
-    anyhow::ensure!(
-        (dsp::db(snap.meters.input as f64 / source_rms as f64)).abs() < 0.3,
-        "Loopback is not pre-volume on this device"
-    );
-    e.controls
-        .target
-        .store(0, std::sync::atomic::Ordering::Relaxed);
-    std::thread::sleep(Duration::from_millis(150));
-    if !muted {
-        anyhow::ensure!(ep.scalar()? < 0.001, "Target 0 did not mute");
+    e.start(Settings { target: 0, output_id: id.clone(), auto_route: false, ..Default::default() }, data.to_path_buf())?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut events = Vec::new();
+    loop {
+        events.extend(e.poll());
+        if events.iter().any(|event| matches!(event, AudioEvent::Stopped)) { break; }
+        anyhow::ensure!(Instant::now() < deadline, "Virtual-output rejection did not finish: {events:?}");
+        std::thread::sleep(Duration::from_millis(20));
     }
-    e.controls
-        .target
-        .store(100, std::sync::atomic::Ordering::Relaxed);
-    std::thread::sleep(Duration::from_millis(120));
-    anyhow::ensure!(
-        ep.scalar()? > 0.001,
-        "Returning from target0 must restore audible Windows gain"
-    );
-    e.controls
-        .target
-        .store(0, std::sync::atomic::Ordering::Relaxed);
-    std::thread::sleep(Duration::from_millis(100));
-    e.controls
-        .leveling
-        .store(false, std::sync::atomic::Ordering::Relaxed);
-    std::thread::sleep(Duration::from_millis(120));
-    anyhow::ensure!(
-        (ep.scalar()? - original).abs() < 0.001,
-        "Disabling leveling at target 0 did not restore Windows volume"
-    );
-    e.controls
-        .leveling
-        .store(true, std::sync::atomic::Ordering::Relaxed);
-    std::thread::sleep(Duration::from_millis(100));
-    e.pause();
-    std::thread::sleep(Duration::from_millis(150));
-    anyhow::ensure!(
-        (ep.scalar()? - original).abs() < 0.001,
-        "Pause did not restore original volume"
-    );
-    e.pause();
-    std::thread::sleep(Duration::from_millis(100));
+    anyhow::ensure!(!events.iter().any(|event| matches!(event, AudioEvent::Started))
+        && events.iter().any(|event| matches!(event, AudioEvent::Error(_))),
+        "Windows must reject a virtual actuator before Started: {events:?}");
+    anyhow::ensure!((ep.scalar()? - original).abs() < 0.001 && ep.muted()? == muted,
+        "Rejected virtual actuator changed volume or mute");
+    for (role, before) in initial_defaults.iter().enumerate() {
+        anyhow::ensure!(*before == core_audio::default_id(role as i32)?, "Rejected virtual actuator changed a default");
+    }
+    anyhow::ensure!(!data.join("recovery.json").exists(), "Rejected virtual actuator left recovery state");
     e.shutdown()?;
-    anyhow::ensure!(
-        (ep.scalar()? - original).abs() < 0.001
-            && ep.muted()? == muted
-            && core_audio::default_id(1)? == initial_defaults[1],
-        "Audio state was not restored"
-    );
-    anyhow::ensure!(
-        !data.join("recovery.json").exists(),
-        "Recovery state remains"
-    );
-    drop(tone);
     // Exercise the real capture/render worker with independently enabled profiles.
     // Manual routing avoids touching the user's Windows default device assignments.
     let devices = core_audio::devices()?;
@@ -2179,12 +2460,13 @@ fn engine_smoke(data: &Path) -> Result<()> {
         .context("Full processing smoke requires installed VB-CABLE")?;
     let output = devices
         .iter()
-        .find(|d| !d.virtual_input && d.name.contains("Realtek"))
-        .or_else(|| devices.iter().find(|d| !d.virtual_input))
+        .find(|d| !d.virtual_input && d.verified_physical && d.name.contains("Realtek"))
+        .or_else(|| devices.iter().find(|d| !d.virtual_input && d.verified_physical))
         .context("No physical playback output")?;
     let defaults: Vec<_> = (0..3).map(core_audio::default_id).collect::<Result<_>>()?;
     let physical_ep = core_audio::Endpoint::new(&output.id)?;
     let physical_original = physical_ep.scalar()?;
+    let physical_muted = physical_ep.muted()?;
     e.start(
         Settings {
             mode: 1,
@@ -2202,13 +2484,32 @@ fn engine_smoke(data: &Path) -> Result<()> {
     let events = e.poll();
     anyhow::ensure!(
         events.iter().any(|v| matches!(v, AudioEvent::Started))
-            && !events.iter().any(|v| matches!(v, AudioEvent::Error(_))),
+            && !events.iter().any(|v| matches!(v, AudioEvent::Error(_) | AudioEvent::DeviceInvalidated(_))),
         "Full capture/render worker failed: {events:?}"
     );
     anyhow::ensure!(
         (physical_ep.scalar()? - physical_original).abs() < 0.001,
         "Profile-only playback changed physical master volume"
     );
+    // Feed only the cable while Full is active at target zero. Stop and drain
+    // the tone before pause (which bypasses DSP), target changes or headroom.
+    let nonzero_before_tone = e.snapshot.lock().unwrap().captured_nonzero_packets();
+    let tone = TestTone::start(source.id.clone());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let captured = loop {
+        let value = *e.snapshot.lock().unwrap();
+        if value.source == audio_engine::MeasurementSource::Sampled && value.captured_nonzero_packets() > nonzero_before_tone { break value; }
+        anyhow::ensure!(Instant::now() < deadline, "Full did not observe nonzero cable packets");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    anyhow::ensure!(captured.meters.output == 0., "Target zero must silence the captured tone");
+    drop(tone);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if e.snapshot.lock().unwrap().silent { break; }
+        anyhow::ensure!(Instant::now() < deadline, "Cable is not quiet after the isolated tone; refusing headroom checks");
+        std::thread::sleep(Duration::from_millis(20));
+    }
     e.controls
         .profile
         .store(7, std::sync::atomic::Ordering::Relaxed);
@@ -2225,7 +2526,7 @@ fn engine_smoke(data: &Path) -> Result<()> {
         .store(true, std::sync::atomic::Ordering::Relaxed);
     std::thread::sleep(Duration::from_millis(100));
     anyhow::ensure!(
-        !e.poll().iter().any(|v| matches!(v, AudioEvent::Error(_))),
+        !e.poll().iter().any(|v| matches!(v, AudioEvent::Error(_) | AudioEvent::DeviceInvalidated(_))),
         "Full worker errored during feature switching"
     );
     anyhow::ensure!(
@@ -2277,14 +2578,1079 @@ fn engine_smoke(data: &Path) -> Result<()> {
             "Full manual routing changed a Windows default"
         );
     }
+    let automatic_evidence = if initial_defaults.iter().all(|id| audio_routing::playback(&devices, id).is_some_and(|d| d.verified_physical)) {
+        for (role, before) in initial_defaults.iter().enumerate() {
+            anyhow::ensure!(*before == core_audio::default_id(role as i32)?, "Host defaults changed before automatic routing check");
+        }
+        // No tone is active. Target zero keeps this automatic route check silent.
+        e.start(Settings { mode: 1, target: 0, leveling: false, profile: 0,
+            source_id: source.id.clone(), output_id: output.id.clone(), auto_route: true,
+            ..Settings::default() }, data.to_path_buf())?;
+        std::thread::sleep(Duration::from_millis(600));
+        let events = e.poll();
+        anyhow::ensure!(events.iter().any(|event| matches!(event, AudioEvent::Started))
+            && !events.iter().any(|event| matches!(event, AudioEvent::Error(_) | AudioEvent::DeviceInvalidated(_))),
+            "Automatic Full routing failed: {events:?}");
+        for role in 0..3 { anyhow::ensure!(core_audio::default_id(role)? == source.id, "Automatic Full did not bind role {role}"); }
+        anyhow::ensure!((physical_ep.scalar()? - physical_original).abs() < 0.001, "Automatic target zero changed output volume");
+        let quiet = e.snapshot.lock().unwrap().silent;
+        if quiet {
+            e.pause();
+            std::thread::sleep(Duration::from_millis(100));
+            for role in 0..3 { anyhow::ensure!(core_audio::default_id(role)? == source.id, "Full pause changed route {role}"); }
+            e.pause();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        e.shutdown()?;
+        for (role, before) in initial_defaults.iter().enumerate() {
+            anyhow::ensure!(*before == core_audio::default_id(role as i32)?, "Automatic Full did not restore role {role}");
+        }
+        anyhow::ensure!((physical_ep.scalar()? - physical_original).abs() < 0.001 && physical_ep.muted()? == physical_muted
+            && !data.join("recovery.json").exists(), "Automatic Full did not restore volume/recovery state");
+        if quiet { "Automatic Full target-zero start, pause/resume and exact three-role restoration passed from a playback baseline." }
+        else { "Automatic Full target-zero start and exact three-role restoration passed; pause/resume skipped because the cable received other audio." }
+    } else {
+        "Automatic Full cycle skipped: initial defaults include a cable or another virtual/unknown playback route; host baseline was preserved."
+    };
     anyhow::ensure!(
         (ep.scalar()? - original).abs() < 0.001
             && ep.muted()? == muted
+            && physical_ep.muted()? == physical_muted
             && !data.join("recovery.json").exists(),
         "Final audio state was not restored"
     );
-    fs::write(data.join("engine-smoke.txt"), "PASS: native Windows endpoint control; targets100/50 use the common loudness scale and native actuator stays in range; target 0 mutes; returning to100 restores native gain; pause/resume; leveling off at target 0 restores volume; stop restores volume, mute and default output; actual VB-CABLE capture and physical render worker starts at target 0 with leveling off/profile on; profiles 1/7/0 and custom EQ +4.5dB, independent feature switching, pause and shutdown run without errors; manual routing preserves all three Windows defaults. Isolated440Hz tone verifies native target100/50 within1dB and pre-volume loopback remains stable within0.3dB. Physical output headroom is reserved only for active nonzero leveling and released on pause/off/stop; profile-only and zero target leave master volume unchanged. No listening assessment or measured hardware frequency response.\n")?;
+    fs::write(data.join("engine-smoke.txt"), format!("PASS: Windows mode rejects a virtual actuator before Started, without changes to volume, mute or any default role and without leaving recovery state. Actual VB-CABLE capture and physical render worker starts at target 0 with leveling off/profile on; sampled nonzero packets are observed during a cable-only 440Hz test signal while this app's rendered output remains zero; packet counts do not uniquely identify the signal and external forwarders are outside this check. Tone is stopped and cable becomes quiet before pause, nonzero targets or headroom checks. Profiles 1/7/0 and custom EQ +4.5dB, feature switching, pause and shutdown run without errors; manual routing preserves all three Windows defaults. Physical headroom is reserved for active nonzero leveling, maintained after a slider change, and released on pause/off/stop; profile-only and target zero leave master volume unchanged. {automatic_evidence} Native target100/50 loudness-scale measurements from earlier smoke versions are not repeated by this harness. No listening assessment or measured hardware frequency response.\n"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tray_scroll_tests {
+    use super::*;
+    use slint::platform::{software_renderer::{MinimalSoftwareWindow, RepaintBufferType}, Platform, PlatformError, WindowAdapter};
+    use std::sync::atomic::Ordering;
+
+    struct Headless(Rc<MinimalSoftwareWindow>);
+    impl Platform for Headless {
+        fn create_window_adapter(&self) -> std::result::Result<Rc<dyn WindowAdapter>, PlatformError> { Ok(self.0.clone()) }
+    }
+
+    fn inert_state(data: PathBuf, settings: Settings) -> Rc<RefCell<State>> {
+        Rc::new(RefCell::new(State {
+            background: background::Background::new(), devices_pending: false, conflicts_pending: false,
+            exiting: false, components: components::Manager::new(&data), app_updates: app_update::Manager::new(),
+            update_handoff_result: None, update_health: None, settings, data, engine: AudioEngine::new(),
+            outputs: vec![], sources: vec![], device_inventory: vec![], history: VecDeque::new(), save_at: None, error: None,
+            initialization_error: None,
+            audio_error_presentation: None,
+            audio_apps: vec![], conflict_scan_at: Instant::now(), unmute_target: Some(88),
+            hotkey_errors: vec![], hotkey_pending_audio: None,
+        }))
+    }
+
+    fn reconnect_device(id: &str, name: &str, virtual_input: bool) -> core_audio::DeviceInfo {
+        core_audio::DeviceInfo { id: id.into(), name: name.into(), virtual_input, vb_cable: virtual_input, verified_physical: !virtual_input, system_default: false }
+    }
+
+    fn reconnect_ui() -> AppWindow {
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+        slint::platform::set_platform(Box::new(Headless(adapter))).unwrap();
+        let ui = AppWindow::new().unwrap();
+        ui.set_recovery_ready(true);
+        ui
+    }
+
+    #[test]
+    fn device_invalidation_preserves_raw_error_and_retranslates_owned_dashboard_text() {
+        let ui = reconnect_ui();
+        ui.show().unwrap();
+        ui.set_english(false);
+        let state = inert_state(std::env::temp_dir().join("maxi-invalidated-presentation"), Settings::default());
+        let osd = Rc::new(RefCell::new(None));
+        let raw = "capture or render operation: device invalidated (0x88890004)";
+        state.borrow_mut().hotkey_pending_audio = Some(HotkeyPendingAudio::Start);
+        present_audio_failure(&ui, &mut state.borrow_mut(), &osd, raw.into(),
+            Some(AudioErrorPresentation::DeviceInvalidated { english: false }));
+        assert_eq!(state.borrow().error.as_deref(), Some(raw));
+        assert_eq!(ui.get_audio_error(), device_invalidated_notice(false));
+        assert_eq!(ui.get_status(), device_invalidated_notice(false));
+        assert!(ui.get_volume_notice().is_empty(), "A second transient must not retain raw or old-language text");
+        assert!(osd.borrow().is_none());
+        ui.set_english(true);
+        read_config(&ui, &mut state.borrow_mut());
+        assert_eq!(ui.get_audio_error(), device_invalidated_notice(true));
+        assert_eq!(ui.get_status(), device_invalidated_notice(true));
+        assert_eq!(state.borrow().error.as_deref(), Some(raw));
+        // A newer status channel is not owned by this error presentation.
+        ui.set_status("Newer independent status".into());
+        ui.set_english(false);
+        read_config(&ui, &mut state.borrow_mut());
+        assert_eq!(ui.get_audio_error(), device_invalidated_notice(false));
+        assert_eq!(ui.get_status(), "Newer independent status");
+    }
+
+    #[test]
+    fn dismissed_or_cleared_invalidation_does_not_return_on_volume_or_language_change() {
+        let ui = reconnect_ui();
+        ui.set_english(false);
+        let state = inert_state(std::env::temp_dir().join("maxi-invalidated-dismiss"), Settings::default());
+        let osd = Rc::new(RefCell::new(None));
+        present_audio_failure(&ui, &mut state.borrow_mut(), &osd, "raw diagnostic".into(),
+            Some(AudioErrorPresentation::DeviceInvalidated { english: false }));
+        ui.invoke_dismiss_notice();
+        ui.invoke_show_volume_notice("Saved volume".into());
+        read_config(&ui, &mut state.borrow_mut());
+        assert!(ui.get_audio_error().is_empty());
+        ui.set_english(true);
+        read_config(&ui, &mut state.borrow_mut());
+        assert!(ui.get_audio_error().is_empty());
+        assert!(state.borrow().audio_error_presentation.is_none());
+        assert_eq!(state.borrow().error.as_deref(), Some("raw diagnostic"), "Dismissal preserves existing safety/error state");
+        clear_audio_error(&ui, &mut state.borrow_mut()); // same boundary used by Run
+        ui.set_english(false);
+        read_config(&ui, &mut state.borrow_mut());
+        assert!(ui.get_audio_error().is_empty());
+        assert!(state.borrow().error.is_none());
+        assert!(state.borrow().audio_error_presentation.is_none());
+    }
+
+    #[test]
+    fn recovery_ownership_and_restore_warning_take_priority_over_friendly_invalidation() {
+        let ui = reconnect_ui();
+        ui.set_english(false);
+        let state = inert_state(std::env::temp_dir().join("maxi-invalidated-recovery"), Settings::default());
+        let osd = Rc::new(RefCell::new(None));
+        state.borrow_mut().initialization_error = Some("Earlier recovery error".into());
+        present_audio_failure(&ui, &mut state.borrow_mut(), &osd, "New invalidation diagnostic".into(),
+            Some(AudioErrorPresentation::DeviceInvalidated { english: false }));
+        apply_initialization_result(&ui, &mut state.borrow_mut(), Ok(()));
+        assert_eq!(state.borrow().error.as_deref(), Some("New invalidation diagnostic"));
+        assert_eq!(ui.get_audio_error(), device_invalidated_notice(false));
+        assert!(state.borrow().audio_error_presentation.is_some());
+        // RestoreWarning uses the same unclassified failure path as Error.
+        present_audio_failure(&ui, &mut state.borrow_mut(), &osd, "Audio restoration is incomplete. Reconnect the previous device.".into(), None);
+        ui.set_english(true);
+        read_config(&ui, &mut state.borrow_mut());
+        assert_eq!(ui.get_audio_error(), "Audio restoration is incomplete. Reconnect the previous device.");
+        assert_eq!(state.borrow().error.as_deref(), Some(ui.get_audio_error().as_str()));
+        assert!(state.borrow().audio_error_presentation.is_none());
+        present_audio_failure(&ui, &mut state.borrow_mut(), &osd, "Another raw invalidation".into(),
+            Some(AudioErrorPresentation::DeviceInvalidated { english: true }));
+        apply_initialization_result(&ui, &mut state.borrow_mut(), Err(anyhow::anyhow!("Recovery blocked")));
+        assert_eq!(ui.get_audio_error(), "Recovery blocked");
+        assert!(state.borrow().audio_error_presentation.is_none());
+        apply_initialization_result(&ui, &mut state.borrow_mut(), Ok(()));
+        assert!(ui.get_audio_error().is_empty());
+        assert!(state.borrow().error.is_none());
+        ui.set_english(false);
+        read_config(&ui, &mut state.borrow_mut());
+        assert!(ui.get_audio_error().is_empty());
+    }
+
+    #[test]
+    fn device_reconnect_missing_output_survives_config_save_and_exact_return() {
+        let ui = reconnect_ui();
+        let data = std::env::temp_dir().join(format!("maxi-104-reconnect-output-{}", std::process::id()));
+        fs::create_dir_all(&data).unwrap();
+        let mut settings = Settings::default();
+        settings.output_id = "bluetooth-original".into();
+        settings.source_id = "cable-original".into();
+        let state = inert_state(data.clone(), settings);
+        let cable = reconnect_device("cable-original", "CABLE Input", true);
+        let speakers = reconnect_device("speakers", "Speakers", false);
+        let headphones = reconnect_device("bluetooth-original", "Headphones", false);
+        apply_devices(&ui, &mut state.borrow_mut(), vec![cable.clone(), speakers.clone(), headphones.clone()]);
+        apply_devices(&ui, &mut state.borrow_mut(), vec![cable.clone(), speakers.clone(), reconnect_device("bluetooth-other", "Headphones", false)]);
+        assert_ne!(ui.get_output_index(), 0, "A missing explicit output must not masquerade as intentional System default");
+        assert_ne!(ui.get_outputs().row_data(ui.get_output_index() as usize).unwrap().as_str(), "Headphones", "A different endpoint with the same name must not replace the remembered device");
+        for (english, mode) in [(true, 1), (false, 0), (true, 0), (false, 1)] {
+            ui.set_english(english);
+            ui.set_mode(mode);
+            ui.set_target(42);
+            read_config(&ui, &mut state.borrow_mut());
+            assert_eq!(state.borrow().settings.output_id, "bluetooth-original");
+            state.borrow().settings.save(&data).unwrap();
+            assert_eq!(Settings::load(&data).output_id, "bluetooth-original");
+        }
+        apply_devices(&ui, &mut state.borrow_mut(), vec![headphones, cable, speakers]);
+        assert_eq!(ui.get_outputs().row_data(ui.get_output_index() as usize).unwrap().as_str(), "Headphones");
+        assert_eq!(state.borrow().settings.output_id, "bluetooth-original");
+        drop(state);
+        fs::remove_file(data.join("settings.json")).unwrap();
+        fs::remove_dir(data).unwrap();
+    }
+
+    #[test]
+    fn device_reconnect_missing_source_survives_empty_inventory_and_config_changes() {
+        let ui = reconnect_ui();
+        let data = std::env::temp_dir().join(format!("maxi-104-reconnect-source-{}", std::process::id()));
+        fs::create_dir_all(&data).unwrap();
+        let mut settings = Settings::default();
+        settings.source_id = "cable-original".into();
+        let state = inert_state(data.clone(), settings);
+        let source = reconnect_device("cable-original", "CABLE Input", true);
+        apply_devices(&ui, &mut state.borrow_mut(), vec![source.clone()]);
+        for inventory in [vec![reconnect_device("cable-other", "CABLE Input", true)], vec![]] {
+            apply_devices(&ui, &mut state.borrow_mut(), inventory);
+            assert_eq!(state.borrow().settings.source_id, "cable-original", "Inventory changes must not replace an explicit source preference");
+            for (english, mode) in [(true, 0), (false, 1)] {
+                ui.set_english(english);
+                ui.set_mode(mode);
+                read_config(&ui, &mut state.borrow_mut());
+                assert_eq!(state.borrow().settings.source_id, "cable-original");
+                state.borrow().settings.save(&data).unwrap();
+                assert_eq!(Settings::load(&data).source_id, "cable-original");
+            }
+        }
+        let reloaded = inert_state(data.clone(), Settings::load(&data));
+        apply_devices(&ui, &mut reloaded.borrow_mut(), vec![]);
+        assert!(ui.get_source_unavailable(), "A saved unavailable ID must survive a new UI with no cached friendly name");
+        assert_eq!(reloaded.borrow().settings.source_id, "cable-original");
+        apply_devices(&ui, &mut reloaded.borrow_mut(), vec![source]);
+        assert_eq!(ui.get_sources().row_data(ui.get_source_index() as usize).unwrap().as_str(), "CABLE Input");
+        assert!(!ui.get_source_unavailable());
+        drop(reloaded);
+        drop(state);
+        fs::remove_file(data.join("settings.json")).unwrap();
+        fs::remove_dir(data).unwrap();
+    }
+
+    #[test]
+    fn device_reconnect_intentional_system_default_remains_distinct() {
+        let ui = reconnect_ui();
+        let state = inert_state(std::env::temp_dir().join("maxi-104-reconnect-default-inert"), Settings::default());
+        for inventory in [vec![], vec![reconnect_device("speakers", "Speakers", false)]] {
+            apply_devices(&ui, &mut state.borrow_mut(), inventory);
+            for english in [true, false] {
+                ui.set_english(english);
+                read_config(&ui, &mut state.borrow_mut());
+                assert_eq!(ui.get_output_index(), 0);
+                assert!(state.borrow().settings.output_id.is_empty());
+                assert_eq!(ui.get_outputs().row_data(0).unwrap().as_str(), if english { "System default" } else { "خروجی پیش‌فرض ویندوز" });
+            }
+        }
+    }
+
+    #[test]
+    fn device_reconnect_start_rejects_missing_selection_but_stop_remains_available() {
+        let ui = reconnect_ui();
+        let mut settings = Settings::default();
+        settings.output_id = "bluetooth-original".into();
+        settings.source_id = "cable-original".into();
+        let state = inert_state(std::env::temp_dir().join("maxi-104-reconnect-readiness-inert"), settings);
+        ui.set_mode(1);
+        apply_devices(&ui, &mut state.borrow_mut(), vec![reconnect_device("cable-original", "CABLE Input", true), reconnect_device("speakers", "Speakers", false)]);
+        assert!(!audio_toggle_allowed(&ui, &state.borrow()), "Stale UI/tray/hotkey Start must reject a missing explicit output");
+        ui.set_running(true);
+        ui.set_devices_ready(false);
+        for paused in [false, true] {
+            ui.set_paused(paused);
+            assert!(audio_toggle_allowed(&ui, &state.borrow()), "Missing inventory must never prevent Stop, including while paused");
+        }
+        ui.set_recovery_ready(false);
+        state.borrow_mut().components.busy = true;
+        assert!(audio_toggle_allowed(&ui, &state.borrow()), "Stop must bypass recovery and component gates too");
+        ui.set_busy(true);
+        assert!(!audio_toggle_allowed(&ui, &state.borrow()), "An already pending Stop must remain deduplicated");
+        ui.set_busy(false);
+        state.borrow_mut().exiting = true;
+        assert!(!audio_toggle_allowed(&ui, &state.borrow()));
+    }
+
+    #[test]
+    fn device_reconnect_availability_tracks_explicit_selection_and_localized_rows() {
+        let ui = reconnect_ui();
+        let mut settings = Settings::default();
+        settings.output_id = "headphones".into();
+        settings.source_id = "cable-original".into();
+        let state = inert_state(std::env::temp_dir().join("maxi-104-reconnect-choices-inert"), settings);
+        ui.set_mode(1);
+        apply_devices(&ui, &mut state.borrow_mut(), vec![reconnect_device("headphones", "Headphones", false), reconnect_device("cable-original", "CABLE Input", true)]);
+        apply_devices(&ui, &mut state.borrow_mut(), vec![reconnect_device("speakers", "Speakers", false), reconnect_device("cable-other", "CABLE Input", true)]);
+        assert!(ui.get_output_unavailable() && ui.get_source_unavailable());
+        assert!(!audio_toggle_allowed(&ui, &state.borrow()));
+        let missing_output = ui.get_output_index();
+        let missing_source = ui.get_source_index();
+        for english in [true, false, true, false] {
+            ui.set_english(english);
+            read_config(&ui, &mut state.borrow_mut());
+            let output = ui.get_outputs().row_data(missing_output as usize).unwrap();
+            assert_eq!(output.as_str(), if english { "Unavailable · Headphones" } else { "در دسترس نیست · Headphones" });
+            assert!(ui.get_output_unavailable() && ui.get_source_unavailable());
+        }
+        ui.set_output_index(0); // Intentional default is an available preference, not a missing ID.
+        ui.set_mode(0);
+        read_config(&ui, &mut state.borrow_mut());
+        assert!(!ui.get_output_unavailable() && ui.get_source_unavailable());
+        assert!(audio_toggle_allowed(&ui, &state.borrow()), "Windows mode does not require a virtual source");
+        ui.set_mode(1);
+        read_config(&ui, &mut state.borrow_mut());
+        assert!(!audio_toggle_allowed(&ui, &state.borrow()), "Full mode does require its selected virtual source");
+        ui.set_source_index(0); // Explicitly choose the available alternative cable.
+        read_config(&ui, &mut state.borrow_mut());
+        assert!(!ui.get_output_unavailable() && !ui.get_source_unavailable());
+        assert!(audio_toggle_allowed(&ui, &state.borrow()));
+        assert!(state.borrow().settings.output_id.is_empty());
+        assert_eq!(state.borrow().settings.source_id, "cable-other");
+        ui.set_output_index(missing_output);
+        ui.set_source_index(missing_source);
+        read_config(&ui, &mut state.borrow_mut());
+        assert!(ui.get_output_unavailable() && ui.get_source_unavailable());
+        assert_eq!(state.borrow().settings.output_id, "headphones");
+        assert_eq!(state.borrow().settings.source_id, "cable-original");
+        apply_devices(&ui, &mut state.borrow_mut(), vec![reconnect_device("cable-original", "CABLE renamed", true), reconnect_device("headphones", "Headphones renamed", false)]);
+        assert!(!ui.get_output_unavailable() && !ui.get_source_unavailable());
+        assert!(audio_toggle_allowed(&ui, &state.borrow()));
+        ui.set_output_index(-1);
+        read_config(&ui, &mut state.borrow_mut());
+        assert!(ui.get_output_unavailable());
+        assert!(!audio_toggle_allowed(&ui, &state.borrow()));
+        assert_eq!(state.borrow().settings.output_id, "headphones", "An invalid index must not replace the saved preference");
+    }
+
+    #[test]
+    fn device_reconnect_full_default_resolves_only_runtime_config_without_guessing() {
+        let ui = reconnect_ui();
+        ui.set_mode(1);
+        ui.set_english(true);
+        let state = inert_state(std::env::temp_dir().join("maxi-104-reconnect-resolver-inert"), Settings::default());
+        apply_devices(&ui, &mut state.borrow_mut(), vec![reconnect_device("cable", "CABLE Input", true), reconnect_device("speakers", "Speakers", false)]);
+        read_config(&ui, &mut state.borrow_mut());
+        let config = prepare_audio_config(&ui, &state.borrow(), || Ok("speakers".into())).unwrap();
+        assert_eq!(config.output_id, "speakers");
+        assert!(state.borrow().settings.output_id.is_empty());
+        assert_eq!(ui.get_output_index(), 0);
+        for default in ["cable", "missing-headphones", ""] {
+            assert!(prepare_audio_config(&ui, &state.borrow(), || Ok(default.into())).is_err(), "Full must not guess speakers when default={default:?}");
+            assert!(state.borrow().settings.output_id.is_empty());
+            assert_eq!(ui.get_output_index(), 0);
+        }
+        assert!(prepare_audio_config(&ui, &state.borrow(), || Err(anyhow::anyhow!("default query failed"))).is_err());
+        ui.set_running(true); // A successful run binds config, while later controls retain default intent.
+        ui.set_target(37);
+        ui.set_english(false);
+        read_config(&ui, &mut state.borrow_mut());
+        assert!(state.borrow().settings.output_id.is_empty());
+        assert_eq!(config.output_id, "speakers");
+        assert_eq!(ui.get_output_index(), 0);
+        ui.set_running(false);
+        ui.set_mode(0);
+        read_config(&ui, &mut state.borrow_mut());
+        let windows = prepare_audio_config(&ui, &state.borrow(), || panic!("Windows default must retain its existing engine semantics")).unwrap();
+        assert!(windows.output_id.is_empty());
+        ui.set_mode(1);
+        ui.set_output_index(1);
+        read_config(&ui, &mut state.borrow_mut());
+        let explicit = prepare_audio_config(&ui, &state.borrow(), || panic!("Explicit output must not query or follow Windows default")).unwrap();
+        assert_eq!(explicit.output_id, "speakers");
+        apply_devices(&ui, &mut state.borrow_mut(), vec![reconnect_device("cable", "CABLE Input", true)]);
+        assert!(prepare_audio_config(&ui, &state.borrow(), || panic!("A missing selected row is not an active endpoint")).is_err());
+    }
+
+    #[test]
+    fn automatic_routing_remembered_fallback_stays_runtime_only_and_rechecks_hardware() {
+        let ui = reconnect_ui();
+        ui.set_mode(1);
+        ui.set_english(true);
+        let settings = Settings { last_physical_output_id: "speakers".into(), ..Settings::default() };
+        let state = inert_state(std::env::temp_dir().join("maxi-routing-hint-inert"), settings);
+        let all = vec![reconnect_device("cable", "Renamed cable", true), reconnect_device("speakers", "Speakers", false), reconnect_device("headphones", "Headphones", false)];
+        apply_devices(&ui, &mut state.borrow_mut(), all.clone());
+        read_config(&ui, &mut state.borrow_mut());
+        let config = prepare_audio_config(&ui, &state.borrow(), || Ok("cable".into())).unwrap();
+        assert!(config.output_id.is_empty(), "The worker must freshly verify the remembered fallback");
+        assert_eq!(audio_routing::resolve_output(&config, &all, Some("cable")).unwrap(), "speakers");
+        assert!(state.borrow().settings.output_id.is_empty());
+        assert_eq!(ui.get_output_index(), 0);
+        let mut changed = all;
+        changed[1].verified_physical = false;
+        assert!(audio_routing::resolve_output(&config, &changed, Some("cable")).is_err());
+        ui.set_output_index(2);
+        read_config(&ui, &mut state.borrow_mut());
+        let explicit = prepare_audio_config(&ui, &state.borrow(), || panic!("Explicit selection wins over the remembered hint")).unwrap();
+        assert_eq!(explicit.output_id, "headphones");
+        assert_eq!(state.borrow().settings.last_physical_output_id, "speakers");
+    }
+
+    #[test]
+    fn automatic_routing_source_ambiguity_keeps_selection_explicit_and_localized() {
+        let ui = reconnect_ui();
+        ui.set_mode(1);
+        ui.set_english(true);
+        let state = inert_state(std::env::temp_dir().join("maxi-routing-source-inert"), Settings::default());
+        let first = reconnect_device("cable-one", "First cable", true);
+        let mut second = reconnect_device("cable-two", "Second cable", true);
+        apply_devices(&ui, &mut state.borrow_mut(), vec![first.clone(), second.clone()]);
+        assert!(state.borrow().settings.source_id.is_empty());
+        assert!(ui.get_source_unavailable());
+        assert_eq!(ui.get_sources().row_data(0).unwrap().as_str(), "Select a virtual input");
+        assert!(!audio_toggle_allowed(&ui, &state.borrow()));
+        second.system_default = true;
+        apply_devices(&ui, &mut state.borrow_mut(), vec![first, second]);
+        assert_eq!(state.borrow().settings.source_id, "cable-two");
+        assert!(!ui.get_source_unavailable());
+        // Once selected, a disconnected exact source remains selected.
+        apply_devices(&ui, &mut state.borrow_mut(), vec![reconnect_device("cable-other", "Other cable", true)]);
+        assert_eq!(state.borrow().settings.source_id, "cable-two");
+        assert!(ui.get_source_unavailable());
+    }
+
+    #[test]
+    fn device_reconnect_refresh_rechecks_shared_boundary_and_deduplicates_requests() {
+        let ui = reconnect_ui();
+        let state = inert_state(std::env::temp_dir().join("maxi-104-reconnect-refresh-inert"), Settings::default());
+        let (jobs, requests) = std::sync::mpsc::channel();
+        let (_results, events) = std::sync::mpsc::channel();
+        state.borrow_mut().background = background::Background { jobs, events };
+        // These channels capture requests without executing scans or native audio calls.
+        for blocked in 0..6 {
+            ui.set_running(blocked == 0 || blocked == 1);
+            ui.set_paused(blocked == 1);
+            ui.set_busy(blocked == 2);
+            state.borrow_mut().components.busy = blocked == 3;
+            state.borrow_mut().exiting = blocked == 4;
+            state.borrow_mut().devices_pending = blocked == 5;
+            assert!(!refresh(&ui, &mut state.borrow_mut()).unwrap());
+            request_device_refresh(&ui, &mut state.borrow_mut());
+            assert!(requests.try_recv().is_err(), "Refresh guard {blocked} submitted a scan");
+            assert_eq!(ui.get_device_refresh_state(), 0);
+        }
+        state.borrow_mut().devices_pending = false;
+        state.borrow_mut().exiting = false;
+        state.borrow_mut().components.busy = false;
+        ui.set_running(false); ui.set_paused(false); ui.set_busy(false);
+        request_device_refresh(&ui, &mut state.borrow_mut());
+        assert!(matches!(requests.try_recv().unwrap(), background::Job::Devices));
+        assert!(state.borrow().devices_pending && !ui.get_devices_ready());
+        assert_eq!(ui.get_device_refresh_state(), 1);
+        request_device_refresh(&ui, &mut state.borrow_mut());
+        assert!(requests.try_recv().is_err());
+        apply_device_result(&ui, &mut state.borrow_mut(), Ok(vec![reconnect_device("speakers", "Speakers", false)]));
+        assert_eq!(ui.get_device_refresh_state(), 2);
+        assert!(ui.get_devices_ready() && !state.borrow().devices_pending);
+        assert!(refresh(&ui, &mut state.borrow_mut()).unwrap()); // Internal component refresh stays quiet.
+        assert!(matches!(requests.try_recv().unwrap(), background::Job::Devices));
+        assert_eq!(ui.get_device_refresh_state(), 0);
+        apply_device_result(&ui, &mut state.borrow_mut(), Ok(vec![]));
+        assert_eq!(ui.get_device_refresh_state(), 0);
+        drop(requests); // A failed submission also stays retryable and blocks stale Start.
+        request_device_refresh(&ui, &mut state.borrow_mut());
+        assert_eq!(ui.get_device_refresh_state(), 3);
+        assert!(!ui.get_devices_ready() && !state.borrow().devices_pending);
+    }
+
+    #[test]
+    fn device_reconnect_failed_inventory_retains_choices_errors_and_allows_retry() {
+        let ui = reconnect_ui();
+        let mut settings = Settings::default();
+        settings.output_id = "headphones".into();
+        settings.source_id = "cable".into();
+        let state = inert_state(std::env::temp_dir().join("maxi-104-reconnect-scan-error-inert"), settings);
+        apply_devices(&ui, &mut state.borrow_mut(), vec![reconnect_device("headphones", "Headphones", false), reconnect_device("cable", "CABLE Input", true)]);
+        state.borrow_mut().error = Some("Earlier restoration is incomplete".into());
+        ui.set_audio_error("Earlier restoration is incomplete".into());
+        ui.set_status("Earlier restoration is incomplete".into());
+        state.borrow_mut().devices_pending = true;
+        ui.set_device_refresh_state(1);
+        apply_device_result(&ui, &mut state.borrow_mut(), Err(anyhow::anyhow!("Inventory unavailable")));
+        assert_eq!(ui.get_device_refresh_state(), 3);
+        assert!(!state.borrow().devices_pending && !ui.get_devices_ready());
+        assert!(!ui.get_output_unavailable() && !ui.get_source_unavailable(), "A failed scan must not falsely mark the old inventory disconnected");
+        assert_eq!(ui.get_outputs().row_data(ui.get_output_index() as usize).unwrap().as_str(), "Headphones");
+        assert_eq!(state.borrow().settings.output_id, "headphones");
+        assert_eq!(state.borrow().settings.source_id, "cable");
+        assert_eq!(ui.get_audio_error().as_str(), "Earlier restoration is incomplete");
+        let (jobs, requests) = std::sync::mpsc::channel();
+        let (_results, events) = std::sync::mpsc::channel();
+        state.borrow_mut().background = background::Background { jobs, events };
+        request_device_refresh(&ui, &mut state.borrow_mut());
+        assert!(matches!(requests.try_recv().unwrap(), background::Job::Devices));
+        assert_eq!(ui.get_device_refresh_state(), 1);
+        apply_device_result(&ui, &mut state.borrow_mut(), Ok(vec![reconnect_device("headphones", "Headphones", false), reconnect_device("cable", "CABLE Input", true)]));
+        assert_eq!(ui.get_device_refresh_state(), 2);
+        assert!(ui.get_devices_ready());
+        assert_eq!(state.borrow().error.as_deref(), Some("Earlier restoration is incomplete"));
+        assert_eq!(ui.get_audio_error().as_str(), "Earlier restoration is incomplete");
+        assert_eq!(ui.get_status().as_str(), "Earlier restoration is incomplete");
+    }
+
+    #[test]
+    fn device_reconnect_recovery_retry_clears_only_its_owned_failure() {
+        let ui = reconnect_ui();
+        ui.set_recovery_ready(false);
+        let state = inert_state(std::env::temp_dir().join("maxi-104-reconnect-recovery-error-inert"), Settings::default());
+        let (jobs, requests) = std::sync::mpsc::channel();
+        let (_results, events) = std::sync::mpsc::channel();
+        state.borrow_mut().background = background::Background { jobs, events };
+        request_device_refresh(&ui, &mut state.borrow_mut());
+        assert!(matches!(requests.try_recv().unwrap(), background::Job::Initialize(_)));
+        assert_eq!(ui.get_device_refresh_state(), 1);
+        apply_initialization_result(&ui, &mut state.borrow_mut(), Err(anyhow::anyhow!("Reconnect previous output for recovery")));
+        assert_eq!(ui.get_device_refresh_state(), 3);
+        assert!(!state.borrow().devices_pending && !ui.get_recovery_ready() && !ui.get_devices_ready());
+        assert_eq!(ui.get_audio_error().as_str(), "Reconnect previous output for recovery");
+        request_device_refresh(&ui, &mut state.borrow_mut());
+        assert!(matches!(requests.try_recv().unwrap(), background::Job::Initialize(_)));
+        apply_initialization_result(&ui, &mut state.borrow_mut(), Ok(()));
+        assert!(ui.get_recovery_ready());
+        assert!(state.borrow().error.is_none());
+        assert!(state.borrow().initialization_error.is_none());
+        assert!(ui.get_audio_error().is_empty());
+        assert_eq!(ui.get_device_refresh_state(), 1, "Initialization success still waits for inventory completion");
+        assert!(state.borrow().devices_pending);
+        apply_device_result(&ui, &mut state.borrow_mut(), Ok(vec![]));
+        assert_eq!(ui.get_device_refresh_state(), 2);
+        assert!(ui.get_audio_error().is_empty());
+        assert!(state.borrow().error.is_none());
+    }
+
+    #[test]
+    fn device_reconnect_recovery_retry_preserves_newer_errors_in_each_channel() {
+        let ui = reconnect_ui();
+        let state = inert_state(std::env::temp_dir().join("maxi-104-reconnect-owned-error-inert"), Settings::default());
+        for (state_replaced, ui_replaced) in [(true, true), (true, false), (false, true)] {
+            apply_initialization_result(&ui, &mut state.borrow_mut(), Err(anyhow::anyhow!("Original recovery failure")));
+            if state_replaced { state.borrow_mut().error = Some("Newer safe-exit failure".into()); }
+            if ui_replaced { ui.set_audio_error("Newer audio failure".into()); }
+            apply_initialization_result(&ui, &mut state.borrow_mut(), Ok(()));
+            let expected_state = if state_replaced { Some("Newer safe-exit failure") } else { None };
+            let expected_ui = if ui_replaced { "Newer audio failure" } else { "" };
+            assert_eq!(state.borrow().error.as_deref(), expected_state);
+            assert_eq!(ui.get_audio_error().as_str(), expected_ui);
+            assert!(state.borrow().initialization_error.is_none());
+            apply_device_result(&ui, &mut state.borrow_mut(), Ok(vec![]));
+            assert_eq!(state.borrow().error.as_deref(), expected_state, "Inventory success does not own audio/recovery errors");
+            assert_eq!(ui.get_audio_error().as_str(), expected_ui);
+        }
+        // Ownership is consumed once; a later equal message has no stale owner.
+        state.borrow_mut().error = Some("Original recovery failure".into());
+        ui.set_audio_error("Original recovery failure".into());
+        apply_initialization_result(&ui, &mut state.borrow_mut(), Ok(()));
+        assert_eq!(state.borrow().error.as_deref(), Some("Original recovery failure"));
+        assert_eq!(ui.get_audio_error().as_str(), "Original recovery failure");
+    }
+
+    #[test]
+    fn tray_start_rechecks_readiness_and_never_toggles_a_running_engine() {
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+        slint::platform::set_platform(Box::new(Headless(adapter))).unwrap();
+        let ui = AppWindow::new().unwrap();
+        let state = inert_state(std::env::temp_dir().join("maxi-tray-start-inert"), Settings::default());
+        let accepted = Rc::new(Cell::new(0));
+        let count = accepted.clone(); let weak = ui.as_weak(); let callback_state = state.clone();
+        // Replace only the service boundary: the shared production readiness
+        // gate and adapter run; no initialization or audio jobs are submitted.
+        ui.on_toggle_audio(move || {
+            let ui = weak.upgrade().unwrap();
+            let state = callback_state.borrow_mut();
+            assert!(audio_toggle_allowed(&ui, &state));
+            assert!(!ui.get_running(), "A stale Run must never reach the Stop branch");
+            drop(state); // Match the production callback's mutable State access.
+            count.set(count.get() + 1);
+            ui.set_busy(true); // Accepted production start marks busy before returning.
+        });
+        apply_devices(&ui, &mut state.borrow_mut(), vec![reconnect_device("speakers", "Speakers", false)]);
+        for blocked in 0..5 {
+            ui.set_running(false);
+            ui.set_busy(blocked == 0);
+            state.borrow_mut().components.busy = blocked == 1;
+            ui.set_devices_ready(blocked != 2);
+            ui.set_recovery_ready(blocked != 3);
+            state.borrow_mut().exiting = blocked == 4;
+            handle_tray_start(&ui, &state);
+            assert_eq!(accepted.get(), 0, "Readiness guard {blocked} was bypassed");
+        }
+        state.borrow_mut().exiting = false;
+        ui.set_busy(false); ui.set_devices_ready(true); ui.set_recovery_ready(true);
+        handle_tray_start(&ui, &state);
+        handle_tray_start(&ui, &state); // Duplicate while the first start is pending.
+        assert_eq!(accepted.get(), 1);
+        ui.set_busy(false); ui.set_running(true);
+        for paused in [false, true] {
+            ui.set_paused(paused);
+            handle_tray_start(&ui, &state); // Queued old Run after start completes.
+            assert!(ui.get_running()); assert_eq!(ui.get_paused(), paused);
+            assert_eq!(accepted.get(), 1);
+        }
+    }
+
+    #[test]
+    fn queued_wheel_cannot_cross_processing_modes() {
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+        slint::platform::set_platform(Box::new(Headless(adapter))).unwrap();
+        let ui = AppWindow::new().unwrap();
+        ui.set_english(true);
+        ui.set_hotkey_capture_index(-1);
+        ui.show().unwrap();
+        let data = std::env::temp_dir().join(format!("maxi-104-wheel-mode-{}", std::process::id()));
+        fs::create_dir_all(&data).unwrap();
+        let state = inert_state(data.clone(), Settings::default());
+        let osd = Rc::new(RefCell::new(None));
+        state.borrow().engine.stop();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        for (origin, destination, initial, steps, expected) in [(0, 1, 100, 1, 100), (1, 0, 200, -1, 100)] {
+            ui.set_mode(origin);
+            ui.set_target(initial);
+            read_config(&ui, &mut state.borrow_mut());
+            sender.send(native_tray::Action::ScrollTarget { steps, x: 20, y: 30, windows_mode: origin == 0 }).unwrap();
+            // The real UI commits config changes synchronously, before the
+            // application timer next drains its native action channel.
+            ui.set_mode(destination);
+            read_config(&ui, &mut state.borrow_mut());
+            ui.set_volume_notice("mode change complete".into());
+            state.borrow_mut().save_at = None;
+            state.borrow_mut().unmute_target = Some(77);
+            let native_tray::Action::ScrollTarget { steps, x, y, windows_mode } = receiver.try_recv().unwrap() else { panic!("Expected queued wheel action"); };
+            handle_tray_scroll(&ui, &state, &osd, windows_mode, steps, (x, y));
+            assert_eq!(ui.get_target(), expected, "Old-context wheel action was reinterpreted after a mode change");
+            let saved = state.borrow();
+            assert_eq!(saved.settings.target, expected);
+            assert_eq!(saved.engine.controls.target.load(Ordering::Relaxed), expected);
+            assert_eq!(saved.unmute_target, Some(77));
+            assert!(saved.save_at.is_none(), "Rejected action must not schedule another settings save");
+            assert!(saved.engine.controls.stop.load(Ordering::Relaxed));
+            assert_eq!(ui.get_volume_notice().as_str(), "mode change complete");
+            drop(saved);
+            // A fresh gesture for the new mode still takes the normal path.
+            handle_tray_scroll(&ui, &state, &osd, destination == 0, -1, (x, y));
+            assert_eq!(ui.get_target(), expected - 2);
+            assert!(state.borrow().save_at.is_some());
+            assert_eq!(state.borrow().unmute_target, None);
+        }
+        assert!(osd.borrow().is_none());
+        drop(state);
+        fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
+    fn target_notices_explain_inactive_playback_without_changing_audio_state() {
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+        slint::platform::set_platform(Box::new(Headless(adapter))).unwrap();
+        let ui = AppWindow::new().unwrap();
+        ui.show().unwrap();
+        let osd = Rc::new(RefCell::new(None));
+        for (english, running, paused, leveling, title, detail) in [
+            (true, false, false, true, "Playback stopped", "Saved · Run to apply"),
+            (false, false, false, true, "پردازش متوقف است", "ذخیره شد؛ «اجرا» را بزنید"),
+            (true, false, true, false, "Playback stopped", "Saved · Run to apply"),
+            (false, false, true, false, "پردازش متوقف است", "ذخیره شد؛ «اجرا» را بزنید"),
+            (true, true, true, true, "Playback paused", "Saved · Resume to apply"),
+            (false, true, true, true, "پردازش در حالت مکث است", "ذخیره شد؛ «ادامه» را بزنید"),
+            (true, true, false, true, "Volume target", ""),
+            (false, true, false, true, "سطح صدای هدف", ""),
+            (true, true, false, false, "Volume target", ""),
+            (false, true, false, false, "سطح صدای هدف", ""),
+        ] {
+            ui.set_english(english);
+            ui.set_running(running);
+            ui.set_paused(paused);
+            ui.set_leveling(leveling);
+            for target in [0, 150] {
+                ui.set_target(target);
+                notify_target(&ui, &osd, Some((-1200, 30)));
+                let expected = if detail.is_empty() { format!("{title} · {target}%") } else { format!("{title} · {target}% · {detail}") };
+                assert_eq!(ui.get_volume_notice().as_str(), expected);
+                assert_eq!((ui.get_running(), ui.get_paused(), ui.get_leveling(), ui.get_target()),
+                    (running, paused, leveling, target));
+                assert!(osd.borrow().is_none(), "Visible dashboard must retain its existing notification route");
+            }
+        }
+        ui.hide().unwrap();
+        assert!(!dashboard_accepts_notice(&ui), "Hidden dashboard must leave notices to the native OSD route");
+    }
+
+    #[test]
+    fn wheel_uses_shared_target_and_preserves_paused_stopped_and_busy_states() {
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+        slint::platform::set_platform(Box::new(Headless(adapter))).unwrap();
+        let ui = AppWindow::new().unwrap();
+        ui.set_english(true);
+        ui.set_hotkey_capture_index(-1);
+        ui.show().unwrap(); // Exercise the in-app notice route, without native windows.
+        let data = std::env::temp_dir().join(format!("maxi-104-wheel-{}", std::process::id()));
+        fs::create_dir_all(&data).unwrap();
+        let mut settings = Settings::default();
+        settings.output_id = "selected-output".into();
+        settings.source_id = "selected-source".into();
+        let state = inert_state(data.clone(), settings);
+        let osd = Rc::new(RefCell::new(None));
+        state.borrow().engine.stop();
+        for (mode, ceiling) in [(0, 100), (1, 200)] {
+            ui.set_mode(mode);
+            ui.set_running(false);
+            ui.set_paused(false);
+            ui.set_target(0);
+            handle_tray_scroll(&ui, &state, &osd, ui.get_mode() == 0, 1, (-1200, 30));
+            assert_eq!(ui.get_target(), 2, "Wheel-up must not restore the hotkey's remembered target");
+            assert_eq!(state.borrow().unmute_target, None);
+            assert!(!ui.get_running() && !ui.get_paused());
+            assert_eq!(ui.get_volume_notice().as_str(), "Playback stopped · 2% · Saved · Run to apply");
+            assert!(state.borrow().engine.controls.stop.load(Ordering::Relaxed));
+            handle_tray_scroll(&ui, &state, &osd, ui.get_mode() == 0, i32::MAX, (20, 30));
+            assert_eq!(ui.get_target(), ceiling);
+            handle_tray_scroll(&ui, &state, &osd, ui.get_mode() == 0, i32::MIN, (20, 30));
+            assert_eq!(ui.get_target(), 0);
+            // Simulated paused UI/engine controls verify the input adapter; no audio worker is started.
+            ui.set_running(true);
+            ui.set_paused(true);
+            state.borrow().engine.controls.paused.store(true, Ordering::Relaxed);
+            handle_tray_scroll(&ui, &state, &osd, ui.get_mode() == 0, 3, (20, 30));
+            assert_eq!(ui.get_target(), 6);
+            assert!(ui.get_paused() && state.borrow().engine.controls.paused.load(Ordering::Relaxed));
+            assert_eq!(ui.get_volume_notice().as_str(), "Playback paused · 6% · Saved · Resume to apply");
+            assert_eq!(state.borrow().settings.target, 6);
+            assert_eq!(state.borrow().engine.controls.target.load(Ordering::Relaxed), 6);
+        }
+        for blocked in 0..4 {
+            ui.set_busy(blocked == 0);
+            state.borrow_mut().components.busy = blocked == 1;
+            ui.set_hotkey_capture_index(if blocked == 2 { 0 } else { -1 });
+            state.borrow_mut().exiting = blocked == 3;
+            state.borrow_mut().save_at = None;
+            handle_tray_scroll(&ui, &state, &osd, ui.get_mode() == 0, 2, (20, 30));
+            assert_eq!(ui.get_target(), 6);
+            assert!(state.borrow().save_at.is_none(), "Rejected wheel input must not save or update the engine");
+        }
+        state.borrow_mut().exiting = false;
+        ui.set_busy(false);
+        ui.set_hotkey_capture_index(-1);
+        ui.set_paused(false);
+        ui.set_leveling(false);
+        handle_tray_scroll(&ui, &state, &osd, ui.get_mode() == 0, 1, (20, 30));
+        assert_eq!(ui.get_volume_notice(), "Volume target · 8%");
+        state.borrow().settings.save(&data).unwrap();
+        let saved = Settings::load(&data);
+        assert_eq!(saved.target, 8);
+        assert_eq!((&*saved.output_id, &*saved.source_id), ("selected-output", "selected-source"));
+        assert!(osd.borrow().is_none(), "Visible main UI must retain its existing in-app notification route");
+        assert!(!data.join("recovery.json").exists());
+        ui.set_mode(0);
+        ui.set_target(50);
+        handle_tray_scroll(&ui, &state, &osd, ui.get_mode() == 0, 1, (20, 30));
+        assert_eq!(ui.get_target(), 52);
+        handle_hotkey(&ui, &state, &osd, 2); // Actual mute handler, following accepted wheel input.
+        assert_eq!(ui.get_target(), 0);
+        assert_eq!(state.borrow().unmute_target, Some(52));
+        handle_hotkey(&ui, &state, &osd, 2);
+        assert_eq!(ui.get_target(), 52, "Mute restore must retain the target reached before mute");
+        ui.set_target(100);
+        handle_tray_scroll(&ui, &state, &osd, ui.get_mode() == 0, 1, (20, 30));
+        handle_tray_scroll(&ui, &state, &osd, ui.get_mode() == 0, -1, (20, 30));
+        assert_eq!(ui.get_target(), 98);
+        ui.set_target(0);
+        handle_tray_scroll(&ui, &state, &osd, ui.get_mode() == 0, -1, (20, 30));
+        handle_tray_scroll(&ui, &state, &osd, ui.get_mode() == 0, 1, (20, 30));
+        assert_eq!(ui.get_target(), 2);
+        drop(state);
+        fs::remove_dir_all(data).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod dashboard_notice_tests {
+    use super::*;
+    use slint::platform::{software_renderer::{MinimalSoftwareWindow, RepaintBufferType}, Platform, PlatformError, WindowAdapter, WindowEvent, PointerEventButton};
+
+    struct Headless(Rc<MinimalSoftwareWindow>, Rc<Cell<Duration>>);
+    impl Platform for Headless {
+        fn create_window_adapter(&self) -> std::result::Result<Rc<dyn WindowAdapter>, PlatformError> { Ok(self.0.clone()) }
+        fn duration_since_start(&self) -> Duration { self.1.get() }
+    }
+
+    fn assert_notice_text_layout(ui: &AppWindow, pixels: &[slint::Rgb8Pixel]) {
+        let card = ui.get_notice_bounds();
+        let close = ui.get_notice_close_bounds();
+        let text = ui.get_notice_text_bounds();
+        let (usable_left, usable_right) = if ui.get_english() {
+            (card.x + 18., close.x - 11.)
+        } else {
+            (close.x + close.width + 11., card.x + card.width - 18.)
+        };
+        assert!(text.x >= usable_left - 0.1 && text.x + text.width <= usable_right + 0.1,
+            "Text must stay outside the close circle with an 11px gap");
+        assert!((text.x + text.width / 2. - (usable_left + usable_right) / 2.).abs() < 0.1,
+            "Text must be centered in the usable area excluding the close circle: text={text:?}, card={card:?}, close={close:?}");
+        assert!(text.y >= card.y + 10.9 && text.y + text.height <= card.y + card.height - 10.9);
+        // Check actual ink, too: geometry alone would miss a left/right-aligned
+        // Text item occupying the correct rectangle. Union the ink rows so
+        // Persian diacritics/dots do not get mistaken for independent lines.
+        let stride = ui.window().size().width as usize;
+        let mut ink_bounds: Option<(usize, usize)> = None;
+        for y in text.y.ceil() as usize..(text.y + text.height).floor() as usize {
+            let ink: Vec<_> = (usable_left.ceil() as usize..usable_right.floor() as usize)
+                .filter(|&x| { let p = pixels[y * stride + x]; p.r > 180 && p.g > 190 && p.b > 205 }).collect();
+            if let (Some(&left), Some(&right)) = (ink.first(), ink.last()) {
+                ink_bounds = Some(match ink_bounds { Some((old_left, old_right)) => (old_left.min(left), old_right.max(right)), None => (left, right) });
+            }
+        }
+        let (left, right) = ink_bounds.expect("Notification text must actually be painted");
+        assert!(((left + right + 1) as f32 / 2. - (usable_left + usable_right) / 2.).abs() <= 3.,
+            "Painted text must center in usable area, ink={left}..{right}, usable={usable_left}..{usable_right}");
+    }
+
+    #[test]
+    fn notice_route_tracks_window_visibility_separately_from_minimization() {
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+        let clock = Rc::new(Cell::new(Duration::ZERO));
+        slint::platform::set_platform(Box::new(Headless(adapter, clock))).unwrap();
+        let ui = AppWindow::new().unwrap();
+        let osd = Rc::new(RefCell::new(None));
+        assert!(!ui.window().is_visible());
+        assert!(!dashboard_accepts_notice(&ui), "A hidden app must use the native OSD route");
+
+        ui.show().unwrap();
+        assert!(dashboard_accepts_notice(&ui));
+        ui.set_english(true);
+        notify_audio_failure(&ui, &osd, "خطا", "Audio failure", "Full diagnostic chain");
+        assert!(ui.get_volume_notice().contains("Full diagnostic chain"));
+        assert!(osd.borrow().is_none(), "The visible dashboard route must not create a native OSD");
+
+        ui.window().set_minimized(true);
+        // Slint keeps the shown component alive while the independent public
+        // minimized property changes. This is the state a truth-table mock
+        // would miss, and Winit synchronizes it from native window events.
+        assert!(ui.window().is_visible(), "Minimizing must not be mistaken for hiding in this regression");
+        assert!(ui.window().is_minimized());
+        assert!(!dashboard_accepts_notice(&ui), "A shown but minimized app must use the native OSD route");
+
+        ui.window().set_minimized(false);
+        assert!(ui.window().is_visible());
+        assert!(!ui.window().is_minimized());
+        assert!(dashboard_accepts_notice(&ui));
+        notify_action(&ui, &osd, osd::NoticeIcon::Volume, "ذخیره شد", "Restored target", "", "Dashboard restored");
+        assert_eq!(ui.get_volume_notice(), "Restored target · Dashboard restored");
+
+        ui.hide().unwrap();
+        assert!(!ui.window().is_visible());
+        assert!(!ui.window().is_minimized());
+        assert!(!dashboard_accepts_notice(&ui), "Hiding must independently select the native OSD route");
+        assert!(osd.borrow().is_none(), "The regression must not create native windows");
+    }
+
+    #[test]
+    fn notice_lifecycle_renews_reverses_and_preserves_engine_errors() {
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+        let clock = Rc::new(Cell::new(Duration::ZERO));
+        slint::platform::set_platform(Box::new(Headless(adapter.clone(), clock.clone()))).unwrap();
+        adapter.set_size(slint::LogicalSize::new(1280., 860.));
+        let ui = AppWindow::new().unwrap();
+        ui.show().unwrap();
+        let draw = |millis: u64, capture: Option<&str>| {
+            clock.set(clock.get() + Duration::from_millis(millis));
+            slint::platform::update_timers_and_animations();
+            let size = ui.window().size();
+            let mut pixels = vec![slint::Rgb8Pixel::default(); (size.width * size.height) as usize];
+            window_repaint::full_redraw(ui.window());
+            adapter.draw_if_needed(|renderer| { renderer.render(&mut pixels, size.width as usize); });
+            if let (Some(name), Some(folder)) = (capture, std::env::var_os("MAXI_NOTICE_CAPTURE_DIR")) {
+                let folder = PathBuf::from(folder);
+                fs::create_dir_all(&folder).unwrap();
+                let mut encoder = png::Encoder::new(fs::File::create(folder.join(format!("{name}.png"))).unwrap(), size.width, size.height);
+                encoder.set_color(png::ColorType::Rgb);
+                encoder.set_depth(png::BitDepth::Eight);
+                encoder.write_header().unwrap().write_image_data(&pixels.iter().flat_map(|p| [p.r, p.g, p.b]).collect::<Vec<_>>()).unwrap();
+            }
+            pixels
+        };
+        draw(0, None);
+        assert_eq!(ui.get_notice_reveal(), 0.);
+        ui.invoke_show_volume_notice("ولوم هدف · ۱۰۰٪".into());
+        draw(0, None);
+        draw(100, Some("FA-entering"));
+        let entering = ui.get_notice_reveal();
+        let entering_y = ui.get_notice_bounds().y;
+        assert!(entering > 0. && entering < 1., "Entry must animate: {entering}");
+        draw(100, Some("FA-held"));
+        assert_eq!(ui.get_notice_reveal(), 1.);
+        assert!(ui.get_notice_bounds().y < entering_y);
+        draw(2600, None);
+        ui.invoke_show_volume_notice("ولوم هدف · ۱۰۰٪".into()); // Identical clamped input renews the deadline.
+        draw(0, None);
+        draw(400, None); // Past the original deadline.
+        assert_eq!(ui.get_notice_reveal(), 1.);
+        assert!(!ui.get_volume_notice().is_empty());
+        draw(2600, None);
+        draw(100, Some("FA-exiting"));
+        let exiting = ui.get_notice_reveal();
+        assert!(exiting > 0. && exiting < 1.);
+        assert_eq!(ui.get_notice_display_text(), "ولوم هدف · ۱۰۰٪");
+        ui.set_english(true);
+        ui.invoke_show_volume_notice("New target · 90%".into());
+        draw(0, None);
+        assert!((ui.get_notice_reveal() - exiting).abs() < 0.01, "Renewing during exit must not jump");
+        draw(200, Some("EN-renewed"));
+        assert_eq!(ui.get_notice_reveal(), 1.);
+        draw(200, None); // Past any old exit cleanup.
+        assert_eq!(ui.get_volume_notice(), "New target · 90%");
+        ui.invoke_dismiss_notice();
+        draw(0, None);
+        draw(100, None);
+        let before_resize = ui.get_notice_bounds();
+        let long_notice = "Saved target · 90%\nVirtual cable processing mode\nAudio configuration retained\nOpen the app log for details.";
+        ui.invoke_show_volume_notice(long_notice.into());
+        draw(0, None);
+        let after_resize = ui.get_notice_bounds();
+        assert!((after_resize.y - before_resize.y).abs() < 0.1, "Long replacement must not jump vertically");
+        assert!((after_resize.height - before_resize.height).abs() < 0.1, "Card height must resize continuously");
+        draw(50, Some("EN-long-renewing"));
+        assert!(ui.get_notice_bounds().height > before_resize.height);
+        ui.set_audio_error("Engine unavailable\nPersistent diagnostic\nCheck the output device\nOpen the app log\nTry again after recovery".into());
+        draw(0, None);
+        draw(50, None);
+        assert!(ui.get_notice_display_text().starts_with("Engine unavailable"));
+        ui.set_audio_error("".into());
+        draw(0, None);
+        assert_eq!(ui.get_notice_display_text(), long_notice);
+        // Dismiss while the resized card is still growing, then renew again.
+        ui.invoke_dismiss_notice();
+        draw(0, None);
+        draw(100, None);
+        assert!(ui.get_notice_reveal() > 0. && ui.get_notice_reveal() < 1.);
+        ui.invoke_show_volume_notice("New target · 90%".into());
+        draw(0, None);
+        draw(200, None);
+        ui.set_audio_error("Persistent engine failure".into());
+        draw(0, None);
+        draw(3100, None);
+        assert!(ui.get_volume_notice().is_empty());
+        assert_eq!(ui.get_notice_reveal(), 1.);
+        assert_eq!(ui.get_notice_display_text(), "Persistent engine failure");
+        ui.invoke_show_volume_notice("Latest transient".into());
+        ui.set_audio_error("".into()); // Recovery exposes a still-active newer transient.
+        draw(0, None);
+        assert_eq!(ui.get_notice_display_text(), "Latest transient");
+        ui.invoke_dismiss_notice();
+        draw(0, None);
+        draw(100, None);
+        ui.set_audio_error("Error arrived during exit".into());
+        draw(0, None);
+        draw(200, None);
+        assert_eq!(ui.get_notice_reveal(), 1.);
+        assert_eq!(ui.get_notice_display_text(), "Error arrived during exit");
+        let close = ui.get_notice_close_bounds();
+        let position = slint::LogicalPosition::new(close.x + close.width / 2., close.y + close.height / 2.);
+        ui.window().dispatch_event(WindowEvent::PointerMoved { position });
+        ui.window().dispatch_event(WindowEvent::PointerPressed { position, button: PointerEventButton::Left });
+        ui.window().dispatch_event(WindowEvent::PointerReleased { position, button: PointerEventButton::Left });
+        draw(0, None);
+        draw(100, None);
+        assert!(ui.get_audio_error().is_empty());
+        assert_eq!(ui.get_notice_display_text(), "Error arrived during exit");
+        assert!(ui.get_notice_reveal() > 0. && ui.get_notice_reveal() < 1.);
+        draw(100, Some("dismissed"));
+        assert_eq!(ui.get_notice_reveal(), 0.);
+
+        let osd = Rc::new(RefCell::new(None));
+        for (english, label) in [(false, "FA"), (true, "EN")] {
+            ui.set_english(english);
+            for (width, height, size_label) in [(1280., 860., "normal"), (640., 320., "small")] {
+                adapter.set_size(slint::LogicalSize::new(width, height));
+                for (text, sample) in if english {
+                    [("Volume target · 95%", "short"),
+                     ("Playback stopped · 95% · Saved · Run to apply", "long-single"),
+                     ("Saved target · 95%\nVirtual cable processing mode\nOpen the app log for details.", "wrapped")]
+                } else {
+                    [("سطح صدای هدف · 95%", "short"),
+                     ("پردازش متوقف است · 95% · ذخیره شد؛ «اجرا» را بزنید", "long-single"),
+                     ("سطح صدای هدف · 95%\nپردازش کابل مجازی\nبرای جزئیات، گزارش برنامه را باز کن.", "wrapped")]
+                } {
+                    ui.invoke_show_volume_notice(text.into());
+                    draw(0, None);
+                    let pixels = draw(400, Some(&format!("{label}-{size_label}-layout-{sample}")));
+                    assert_notice_text_layout(&ui, &pixels);
+                    if sample == "wrapped" { assert!(ui.get_notice_bounds().height > 54.); }
+                }
+                ui.invoke_show_volume_notice(if english { "Boost above 100 requires Full boost / virtual cable in Processing mode." } else { "برای بوست بالاتر از ۱۰۰، گزینهٔ بوست کامل / کابل مجازی را از حالت پردازش انتخاب کن." }.into());
+                draw(0, None);
+                draw(400, Some(&format!("{label}-{size_label}-long")));
+                let bounds = ui.get_notice_bounds();
+                assert!(bounds.width <= 520. && bounds.height >= 54.);
+                assert!((bounds.x + bounds.width / 2. - ui.get_body_x() - ui.get_body_width() / 2.).abs() < 1.);
+                assert!(bounds.y >= 0. && bounds.y + bounds.height <= height - 22.);
+                let close = ui.get_notice_close_bounds();
+                assert!(close.x >= bounds.x && close.x + close.width <= bounds.x + bounds.width);
+                assert_eq!(close.height, 36.);
+                assert!(close.y >= bounds.y + 9. && close.y + close.height <= bounds.y + bounds.height - 9.);
+                let saved_audio_state = (ui.get_running(), ui.get_paused(), ui.get_target());
+                for (running, paused, state_label) in [(true, false, "active"), (false, false, "stopped"), (true, true, "paused")] {
+                    ui.set_running(running);
+                    ui.set_paused(paused);
+                    ui.set_target(95);
+                    notify_target(&ui, &osd, None);
+                    draw(0, None);
+                    let pixels = draw(400, Some(&format!("{label}-{size_label}-target-{state_label}")));
+                    assert_notice_text_layout(&ui, &pixels);
+                    let bounds = ui.get_notice_bounds();
+                    assert!(bounds.width <= 520. && bounds.height >= 54.);
+                    assert!((bounds.x + bounds.width / 2. - ui.get_body_x() - ui.get_body_width() / 2.).abs() < 1., "Inactive notice must remain centered");
+                    assert!(bounds.x >= 0. && bounds.x + bounds.width <= width);
+                    assert!(bounds.y >= 0. && bounds.y + bounds.height <= height - 22.);
+                    assert_eq!((ui.get_running(), ui.get_paused(), ui.get_target()), (running, paused, 95));
+                    assert!(osd.borrow().is_none(), "Visible target notices must use the dashboard route");
+                }
+                ui.set_running(saved_audio_state.0);
+                ui.set_paused(saved_audio_state.1);
+                ui.set_target(saved_audio_state.2);
+            }
+        }
+        draw(3000, None);
+        draw(200, None);
+        assert_eq!(ui.get_notice_reveal(), 0.);
+        if std::env::var_os("MAXI_NOTICE_CAPTURE_DIR").is_some() {
+            for (english, label) in [(false, "FA"), (true, "EN")] {
+                adapter.set_size(slint::LogicalSize::new(1280., 760.));
+                ui.set_english(english);
+                ui.invoke_scroll_page(1.);
+                draw(400, None);
+                ui.invoke_preview_routing_help();
+                draw(0, None);
+                draw(400, Some(&format!("{label}-depth-help")));
+                ui.invoke_close_routing_help();
+                ui.set_mode(1);
+                ui.invoke_preview_profile_menu();
+                draw(0, None);
+                draw(400, Some(&format!("{label}-depth-dropdown")));
+                ui.invoke_close_profile_menu();
+                ui.set_mode(0);
+                let before_modal = draw(0, None);
+                ui.invoke_preview_confirmation();
+                let modal_pixels = draw(400, Some(&format!("{label}-depth-modal")));
+                // Rounded fill must leave all four bounding-box corner pixels
+                // showing only the modal scrim over the original dashboard.
+                // This catches the software renderer's square-gradient bug.
+                for (x, y) in [(408, 266), (871, 266), (408, 493), (871, 493)] {
+                    let before = before_modal[y * 1280 + x];
+                    let after = modal_pixels[y * 1280 + x];
+                    for (background, actual, scrim) in [(before.r, after.r, 2), (before.g, after.g, 7), (before.b, after.b, 22)] {
+                        let expected = (u32::from(background) * 79 + scrim * 176) / 255;
+                        assert!((i32::from(actual) - expected as i32).abs() <= 3, "Rounded modal leaked fill at ({x}, {y}): {actual} vs {expected}");
+                    }
+                }
+                ui.invoke_close_preview_confirmation();
+                adapter.set_size(slint::LogicalSize::new(820., 760.));
+                draw(400, None);
+                ui.invoke_toggle_sidebar();
+                draw(0, None);
+                draw(400, Some(&format!("{label}-depth-compact-nav")));
+                ui.invoke_dismiss_sidebar_menu();
+                adapter.set_size(slint::LogicalSize::new(1280., 360.));
+                ui.invoke_scroll_page(0.);
+                draw(400, None);
+                // Synthetic dense cyan/blue graph exercises the translucent
+                // notice over active-looking content without starting audio.
+                let history: VecDeque<LevelPoint> = (0..64).map(|i| LevelPoint { input: if i % 2 == 0 { 1. } else { 0.15 }, output: if i % 2 == 0 { 0.1 } else { 1. } }).collect();
+                ui.set_input_path(graph_path(&history, ui.get_graph_width(), ui.get_graph_height(), false).into());
+                ui.set_output_path(graph_path(&history, ui.get_graph_width(), ui.get_graph_height(), true).into());
+                ui.set_running(true);
+                ui.set_paused(false);
+                ui.set_target(100);
+                notify_target(&ui, &osd, None);
+                draw(0, None);
+                draw(400, Some(&format!("{label}-depth-graph-contrast")));
+                ui.invoke_dismiss_notice();
+                draw(200, None);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

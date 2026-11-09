@@ -68,19 +68,27 @@ pub struct DeviceInfo {
     pub name: String,
     pub virtual_input: bool,
     pub vb_cable: bool,
+    pub verified_physical: bool,
+    pub system_default: bool,
 }
 impl DeviceInfo {
     fn from_endpoint(endpoint: crate::cable_evidence::Endpoint) -> Self {
         let vb_cable = crate::cable_evidence::is_vb_cable_interface(&endpoint.interface);
         let name = endpoint.name.to_ascii_lowercase();
-        Self { id: endpoint.id, name: endpoint.name, vb_cable,
+        let verified_physical = endpoint.hardware == crate::cable_evidence::Hardware::Physical && !vb_cable;
+        Self { id: endpoint.id, name: endpoint.name, vb_cable, verified_physical, system_default: false,
             virtual_input: vb_cable || name.contains("cable") || name.contains("voicemeeter") || name.contains("virtual audio") }
     }
 }
 pub fn devices() -> Result<Vec<DeviceInfo>> {
-    let inventory = crate::cable_evidence::native_active_inventory()?;
+    let _com = ComScope::new()?;
+    let inventory = crate::cable_evidence::native_active_hardware_inventory()?;
     anyhow::ensure!(!inventory.enumeration_failed, "Audio endpoint identities could not be completely determined");
-    Ok(inventory.endpoints.into_iter().filter(|e| e.active).map(DeviceInfo::from_endpoint).collect())
+    let current = default_id(1).ok();
+    Ok(inventory.endpoints.into_iter().filter(|e| e.active).map(DeviceInfo::from_endpoint).map(|mut d| {
+        d.system_default = current.as_deref() == Some(d.id.as_str());
+        d
+    }).collect())
 }
 
 pub struct Endpoint {
@@ -156,16 +164,53 @@ pub fn set_default(id: &str, role: i32) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteRestore {
+    pub role: i32,
+    pub original_id: String,
+    pub expected_id: String,
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct RecoveryState {
     pub volume_id: String,
     pub original_scalar: f32,
     pub source_id: String,
     pub original_defaults: Vec<String>,
+    #[serde(default)]
+    pub routes: Vec<RouteRestore>,
 }
 impl RecoveryState {
     pub fn save(&self, data: &Path) -> Result<()> {
-        crate::settings::write_json(&data.join("recovery.json"), self)
+        crate::settings::write_json(&data.join("recovery.json"), &self.compatibility_marker()?)
+    }
+    fn compatibility_marker(&self) -> Result<Self> {
+        let mut marker = self.clone();
+        if let Some(first) = self.routes.first() {
+            anyhow::ensure!(!first.expected_id.is_empty() && self.routes.iter().all(|route|
+                route.expected_id == first.expected_id && !route.original_id.is_empty() && (0..3).contains(&route.role)),
+                "Recovery routes need one nonempty owned target and valid roles");
+            // Released versions understand one common target. Untouched roles
+            // are padded with that target so their legacy restore is a no-op.
+            marker.source_id = first.expected_id.clone();
+            marker.original_defaults = vec![first.expected_id.clone(); 3];
+            for route in &self.routes { marker.original_defaults[route.role as usize] = route.original_id.clone(); }
+        }
+        Ok(marker)
+    }
+    fn restore_routes_with(&self, mut read: impl FnMut(i32) -> Result<String>, mut write: impl FnMut(&str, i32) -> Result<()>) -> Result<()> {
+        let legacy = self.original_defaults.iter().enumerate().filter(|_| self.routes.is_empty() && !self.source_id.is_empty())
+            .map(|(role, id)| RouteRestore { role: role as i32, original_id: id.clone(), expected_id: self.source_id.clone() });
+        let mut failures = Vec::new();
+        for route in self.routes.iter().cloned().chain(legacy) {
+            if let Err(error) = (|| -> Result<()> {
+                anyhow::ensure!((0..3).contains(&route.role), "Invalid audio role in recovery");
+                if read(route.role)? == route.expected_id { write(&route.original_id, route.role)?; }
+                Ok(())
+            })() { failures.push(format!("role {}: {error:#}", route.role)); }
+        }
+        anyhow::ensure!(failures.is_empty(), "{}", failures.join("; "));
+        Ok(())
     }
     pub fn restore(&self, data: &Path) -> Result<()> {
         let mut failures = Vec::new();
@@ -176,17 +221,8 @@ impl RecoveryState {
                 failures.push(format!("Volume restore: {e:#}"));
             }
         }
-        if !self.source_id.is_empty() {
-            for (role, original) in self.original_defaults.iter().enumerate() {
-                if let Err(e) = (|| -> Result<()> {
-                    if default_id(role as i32)? == self.source_id {
-                        set_default(original, role as i32)?;
-                    }
-                    Ok(())
-                })() {
-                    failures.push(format!("Route restore: {e:#}"));
-                }
-            }
+        if let Err(e) = self.restore_routes_with(default_id, |id, role| set_default(id, role)) {
+            failures.push(format!("Route restore: {e:#}"));
         }
         anyhow::ensure!(failures.is_empty(), "{}", failures.join("; "));
         let file = data.join("recovery.json");
@@ -220,6 +256,45 @@ impl RecoveryGuard {
             data: data.into(),
             restored: false,
         })
+    }
+    /// Save first: a failed commit retains the old durable and in-memory rollback.
+    pub fn replace_routes(&mut self, routes: Vec<RouteRestore>) -> Result<()> {
+        self.replace_routes_with(routes, |state, data| state.save(data))
+    }
+    fn replace_routes_with(&mut self, routes: Vec<RouteRestore>, mut save: impl FnMut(&RecoveryState, &Path) -> Result<()>) -> Result<()> {
+        let mut next = self.state.clone();
+        next.routes = routes;
+        next.source_id.clear();
+        next.original_defaults.clear();
+        save(&next, &self.data)?;
+        self.state = next;
+        Ok(())
+    }
+    pub fn route(&mut self, route: RouteRestore) -> Result<bool> {
+        self.route_with(route, default_id, |id, role| set_default(id, role), |state, data| state.save(data))
+    }
+    fn route_with(&mut self, route: RouteRestore,
+        mut read: impl FnMut(i32) -> Result<String>,
+        mut write: impl FnMut(&str, i32) -> Result<()>,
+        mut save: impl FnMut(&RecoveryState, &Path) -> Result<()>) -> Result<bool> {
+        if read(route.role)? != route.original_id { return Ok(false); }
+        let before = self.state.clone();
+        let mut next = before.clone();
+        next.routes.push(route.clone());
+        save(&next, &self.data)?;
+        self.state = next;
+        // Durable IO can take time. Recheck immediately before the setter.
+        let observed = read(route.role);
+        if observed.as_ref().map_or(true, |id| id != &route.original_id) {
+            // We know the setter was not attempted. Drop must not restore this
+            // role even if the cleanup save itself fails.
+            self.state = before;
+            save(&self.state, &self.data)?;
+            observed?;
+            return Ok(false);
+        }
+        write(&route.expected_id, route.role)?;
+        Ok(true)
     }
     pub fn restore(&mut self) -> Result<()> {
         self.state.restore(&self.data)?;
@@ -543,5 +618,179 @@ mod cable_identity_tests {
         assert!(other.virtual_input && !other.vb_cable);
         let physical = DeviceInfo::from_endpoint(endpoint("physical", "Speakers", "USB Audio"));
         assert!(!physical.virtual_input && !physical.vb_cable);
+    }
+    #[test]
+    fn legacy_software_outputs_preserve_manual_intent_without_becoming_physical_fallbacks() {
+        use crate::{audio_routing, cable_evidence::{Endpoint, Hardware}, settings::Settings};
+        for hardware in [Hardware::Software, Hardware::Unknown] {
+            let cable = DeviceInfo::from_endpoint(Endpoint {
+                id: "cable".into(), name: "Renamed input".into(), interface: "VB-Audio Virtual Cable".into(), active: true, hardware,
+            });
+            assert!(cable.virtual_input && cable.vb_cable);
+            assert!(!cable.verified_physical);
+            for name in ["FxSound Speakers", "7.1 Surround Sound", "Steam Streaming Speakers"] {
+                let output = DeviceInfo::from_endpoint(Endpoint {
+                    id: "saved-output".into(), name: name.into(), interface: name.into(), active: true, hardware,
+                });
+                assert!(!output.virtual_input && !output.vb_cable, "Legacy playback output: {name}");
+                assert!(!output.verified_physical, "Software/unknown hardware must not be learned as physical");
+                let devices = vec![cable.clone(), output];
+                let mut settings = Settings {
+                    source_id: "cable".into(), output_id: "saved-output".into(),
+                    last_physical_output_id: "saved-output".into(), auto_route: false, mode: 1,
+                    ..Settings::default()
+                };
+                let resolved = audio_routing::resolve_output(&settings, &devices, Some("external-forwarder")).unwrap();
+                assert_eq!(resolved, "saved-output");
+                let defaults = vec!["external-forwarder".into(); 3];
+                assert!(audio_routing::windows_routes(&settings, &devices, &defaults, &resolved).unwrap().is_empty());
+                assert!(audio_routing::full_routes(&settings, &defaults).is_empty());
+                settings.output_id.clear();
+                settings.auto_route = true;
+                assert!(audio_routing::resolve_output(&settings, &devices, Some("cable")).is_err(),
+                    "Remembering a legacy output ID must not turn it into a physical fallback");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod routing_recovery_tests {
+    use super::*;
+    use std::{cell::{Cell, RefCell}, rc::Rc};
+
+    fn route(role: i32) -> RouteRestore {
+        RouteRestore { role, original_id: "cable".into(), expected_id: "speaker".into() }
+    }
+    fn guard() -> RecoveryGuard {
+        // This injected guard never calls native audio. Drop is disabled because
+        // tests explicitly exercise recovery with an in-memory role store.
+        RecoveryGuard { state: RecoveryState::default(), data: PathBuf::new(), restored: true }
+    }
+    #[test]
+    fn partial_role_failure_keeps_durable_originals_and_ownership_for_recovery() {
+        let roles = Rc::new(RefCell::new(vec!["cable".to_owned(); 3]));
+        let durable = RefCell::new(RecoveryState::default());
+        let mut guard = guard();
+        for role in 0..2 {
+            let result = guard.route_with(route(role), |r| Ok(roles.borrow()[r as usize].clone()), |id, r| {
+                assert!(durable.borrow().routes.iter().any(|v| v.role == r), "Must be durable before the setter");
+                if r == 1 { anyhow::bail!("Injected second-role failure"); }
+                roles.borrow_mut()[r as usize] = id.into();
+                Ok(())
+            }, |state, _| { *durable.borrow_mut() = state.clone(); Ok(()) });
+            assert_eq!(result.is_ok(), role == 0);
+        }
+        assert_eq!(&*roles.borrow(), &["speaker", "cable", "cable"]);
+        assert_eq!(durable.borrow().routes.len(), 2);
+        // A user changes a role we touched. Recovery must leave it alone.
+        roles.borrow_mut()[1] = "external-headphones".into();
+        durable.borrow().restore_routes_with(|r| Ok(roles.borrow()[r as usize].clone()), |id, r| {
+            roles.borrow_mut()[r as usize] = id.into(); Ok(())
+        }).unwrap();
+        assert_eq!(&*roles.borrow(), &["cable", "external-headphones", "cable"]);
+    }
+    #[test]
+    fn pre_mutation_save_failure_and_changed_snapshot_never_call_setter() {
+        let writes = Cell::new(0);
+        let mut guard = guard();
+        let result = guard.route_with(route(0), |_| Ok("cable".into()), |_, _| { writes.set(writes.get() + 1); Ok(()) }, |_, _| anyhow::bail!("Injected write failure"));
+        assert!(result.is_err());
+        assert_eq!(writes.get(), 0);
+        assert!(guard.state.routes.is_empty());
+        let mut reads = 0;
+        let durable = RefCell::new(RecoveryState::default());
+        assert!(!guard.route_with(route(0), |_| {
+            reads += 1; Ok(if reads == 1 { "cable" } else { "external" }.into())
+        }, |_, _| { writes.set(writes.get() + 1); Ok(()) }, |state, _| { *durable.borrow_mut() = state.clone(); Ok(()) }).unwrap());
+        assert!(guard.state.routes.is_empty() && durable.borrow().routes.is_empty());
+        assert_eq!(writes.get(), 0);
+    }
+    #[test]
+    fn skipped_role_cleanup_failure_cannot_create_in_memory_ownership() {
+        let mut guard = guard();
+        let mut reads = 0;
+        let mut saves = 0;
+        assert!(guard.route_with(route(0), |_| {
+            reads += 1; Ok(if reads == 1 { "cable" } else { "external" }.into())
+        }, |_, _| panic!("Skipped role must not be set"), |_, _| {
+            saves += 1; anyhow::ensure!(saves == 1, "Injected cleanup failure"); Ok(())
+        }).is_err());
+        assert!(guard.state.routes.is_empty());
+    }
+    #[test]
+    fn commit_save_failure_retains_rollback_but_success_releases_normalized_defaults() {
+        let mut guard = guard();
+        guard.state.routes.push(route(1));
+        let durable = RefCell::new(guard.state.clone());
+        assert!(guard.replace_routes_with(Vec::new(), |_, _| anyhow::bail!("Injected commit failure")).is_err());
+        assert_eq!(guard.state.routes, durable.borrow().routes);
+        let roles = RefCell::new(vec!["cable".to_owned(), "speaker".to_owned(), "cable".to_owned()]);
+        durable.borrow().restore_routes_with(|r| Ok(roles.borrow()[r as usize].clone()), |id, r| {
+            roles.borrow_mut()[r as usize] = id.into(); Ok(())
+        }).unwrap();
+        assert_eq!(roles.borrow()[1], "cable", "Failed commit must still restore the actual startup baseline");
+        guard.replace_routes_with(Vec::new(), |state, _| { *durable.borrow_mut() = state.clone(); Ok(()) }).unwrap();
+        assert!(guard.state.routes.is_empty() && durable.borrow().routes.is_empty());
+        durable.borrow().restore_routes_with(|_| panic!("Committed normalization has no route rollback"), |_, _| panic!("No route write")).unwrap();
+    }
+    #[test]
+    fn failed_commit_preserves_real_durable_recovery_marker() {
+        let directory = std::env::temp_dir().join(format!("maxi-route-marker-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let state = RecoveryState { routes: vec![route(1)], ..Default::default() };
+        let mut guard = RecoveryGuard::new(state, &directory).unwrap();
+        guard.restored = true; // Injected recovery only; never touch native audio.
+        let before = fs::read(directory.join("recovery.json")).unwrap();
+        assert!(guard.replace_routes_with(Vec::new(), |_, _| anyhow::bail!("Injected commit save failure")).is_err());
+        assert_eq!(fs::read(directory.join("recovery.json")).unwrap(), before);
+        let loaded: RecoveryState = serde_json::from_slice(&before).unwrap();
+        let restored = RefCell::new(Vec::new());
+        loaded.restore_routes_with(|_| Ok("speaker".into()), |id, role| { restored.borrow_mut().push((role, id.to_owned())); Ok(()) }).unwrap();
+        assert_eq!(&*restored.borrow(), &[(1, "cable".into())]);
+        fs::remove_file(directory.join("recovery.json")).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
+    #[test]
+    fn legacy_recovery_marker_keeps_role_specific_ownership_and_settings_migrate() {
+        let state: RecoveryState = serde_json::from_str(r#"{"volume_id":"","original_scalar":0.5,"source_id":"cable","original_defaults":["console","multimedia","communications"]}"#).unwrap();
+        assert!(state.routes.is_empty());
+        let restored = RefCell::new(Vec::new());
+        state.restore_routes_with(|role| Ok(if role == 1 { "external" } else { "cable" }.into()), |id, role| { restored.borrow_mut().push((role, id.to_owned())); Ok(()) }).unwrap();
+        assert_eq!(&*restored.borrow(), &[(0, "console".into()), (2, "communications".into())]);
+        let old: crate::settings::Settings = serde_json::from_str("{}").unwrap();
+        assert!(old.last_physical_output_id.is_empty());
+    }
+    #[test]
+    fn new_marker_is_readable_by_released_recovery_and_committed_windows_clears_mirrors() {
+        #[derive(Deserialize)]
+        struct ReleasedRecovery { source_id: String, original_defaults: Vec<String> }
+        let mut guard = guard();
+        let initial = guard.state.compatibility_marker().unwrap();
+        assert!(initial.source_id.is_empty() && initial.original_defaults.is_empty());
+        guard.state.routes.push(route(1));
+        let marker = guard.state.compatibility_marker().unwrap();
+        let bytes = serde_json::to_vec(&marker).unwrap();
+        let released: ReleasedRecovery = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(released.source_id, "speaker");
+        assert_eq!(released.original_defaults, ["speaker", "cable", "speaker"]);
+        let mut defaults = vec!["speaker".to_owned(), "speaker".to_owned(), "external".to_owned()];
+        let mut changed = Vec::new();
+        for (role, original) in released.original_defaults.iter().enumerate() {
+            if defaults[role] == released.source_id {
+                if defaults[role] != *original { changed.push(role); }
+                defaults[role] = original.clone();
+            }
+        }
+        assert_eq!(defaults, ["speaker", "cable", "external"]);
+        assert_eq!(changed, [1], "Released recovery changes only the attempted role");
+        let new_reader: RecoveryState = serde_json::from_slice(&bytes).unwrap();
+        let writes = Cell::new(0);
+        new_reader.restore_routes_with(|_| Ok("speaker".into()), |_, _| { writes.set(writes.get() + 1); Ok(()) }).unwrap();
+        assert_eq!(writes.get(), 1, "New reader must not replay legacy mirrors too");
+        guard.replace_routes_with(Vec::new(), |state, _| {
+            let committed = state.compatibility_marker()?;
+            assert!(committed.routes.is_empty() && committed.source_id.is_empty() && committed.original_defaults.is_empty());
+            Ok(())
+        }).unwrap();
     }
 }

@@ -1,16 +1,18 @@
-# MAXI SOUNDSET Installer 1.0.3
+# MAXI SOUNDSET Installer 1.0.4
 
 The MAXI SOUNDSET installer and uninstaller are written in Rust with a Slint interface in Persian and English. The installer embeds the app executable and interface resources, so a separate download is not needed during installation.
 
 ## Install
 
-Choose a language, review and accept the agreement, then select an installation folder. Desktop shortcut creation and starting the app when you sign in are optional. Installation is for the current Windows account; the default folder is under `LocalAppData\Programs\MAXI SOUNDSET`.
+Run `MAXI-SOUNDSET-v1.0.4-Setup.exe`. Choose English or Persian, review and accept the agreement, then select an installation folder. Desktop shortcut creation and starting the app when you sign in are optional. Installation is for the current Windows account; the default folder is under `LocalAppData\Programs\MAXI SOUNDSET`.
 
 The installer registers the app with Windows and creates Start menu and uninstall entries. Installing, repairing, or updating VB-CABLE is handled separately through the official vendor installer from the app's Components page.
 
+If MAXI SOUNDSET is open in the selected installation folder, use Close software in Setup and wait for the app to exit before continuing.
+
 ## Uninstall and update
 
-The uninstaller asks the app to exit safely and waits for the process to close. It does not forcibly terminate the app. Settings and logs are kept by default; a separate option removes app data. Other files in the installation folder are preserved.
+The uninstaller asks the app to exit safely and waits for it to close. It does not forcibly terminate the app. Settings and logs are kept by default; a separate option removes app data. Other files in the installation folder are preserved.
 
 During app removal, VB-CABLE removal is optional. When selected, the flow checks the cable identity and an available physical output, then moves Windows audio roles to that output before launching the official VB-Audio installer. If a safe route cannot be established, the operation is guarded. Volume and mute state are protected by the routing and recovery checks.
 
